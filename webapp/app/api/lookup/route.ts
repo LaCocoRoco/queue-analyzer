@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getCharacterZoneRankings, hasData, runsEstimate, toServerSlug } from "@/lib/wcl";
+import { getCharacterProfile, hasData, runsEstimate, toServerSlug } from "@/lib/wcl";
 
 const ZONE_ID = Number(process.env.WCL_ZONE_ID);
 const PARTITION = Number(process.env.WCL_PARTITION);
@@ -13,6 +13,7 @@ export interface LookupResult {
   key: string;
   name: string;
   realm: string;
+  className: string | null;
   found: boolean;
   best?: number;
   median?: number;
@@ -70,22 +71,24 @@ export async function POST(req: NextRequest) {
     const slug = toServerSlug(realm);
 
     try {
-      const zr = await getCharacterZoneRankings(name, slug, REGION, ZONE_ID, PARTITION);
+      const profile = await getCharacterProfile(name, slug, REGION, ZONE_ID, PARTITION);
+      const zr = profile?.zoneRankings ?? null;
       if (hasData(zr)) {
         results.push({
           key,
           name,
           realm,
+          className: profile!.className,
           found: true,
           best: zr.bestPerformanceAverage,
           median: zr.medianPerformanceAverage ?? undefined,
           runs: runsEstimate(zr),
         });
       } else {
-        results.push({ key, name, realm, found: false });
+        results.push({ key, name, realm, className: profile?.className ?? null, found: false });
       }
     } catch (err) {
-      results.push({ key, name, realm, found: false, error: (err as Error).message });
+      results.push({ key, name, realm, className: null, found: false, error: (err as Error).message });
     }
 
     if (i < entries.length - 1) {

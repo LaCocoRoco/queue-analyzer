@@ -6,6 +6,7 @@ interface LookupResult {
   key: string;
   name: string;
   realm: string;
+  className: string | null;
   found: boolean;
   best?: number;
   median?: number;
@@ -13,7 +14,26 @@ interface LookupResult {
   error?: string;
 }
 
-const cellStyle: CSSProperties = { border: "1px solid #333", padding: "6px 10px", textAlign: "left" };
+// Standard WoW class colors (RAID_CLASS_COLORS). Duplicated from lib/wcl.ts
+// on purpose -- this is a client component, keep it free of the
+// server-only WCL client code.
+const CLASS_COLORS: Record<string, string> = {
+  "Death Knight": "#C41F3B",
+  "Demon Hunter": "#A330C9",
+  Druid: "#FF7C0A",
+  Evoker: "#33937F",
+  Hunter: "#AAD372",
+  Mage: "#3FC7EB",
+  Monk: "#00FF98",
+  Paladin: "#F58CBA",
+  Priest: "#FFFFFF",
+  Rogue: "#FFF468",
+  Shaman: "#0070DD",
+  Warlock: "#8788EE",
+  Warrior: "#C69B6D",
+};
+
+const cellStyle: CSSProperties = { border: "1px solid #333", padding: "3px 8px", textAlign: "left" };
 
 export default function LookupForm() {
   const [results, setResults] = useState<LookupResult[] | null>(null);
@@ -86,7 +106,7 @@ export default function LookupForm() {
       {error && <p style={{ color: "#ff6b6b", marginTop: 12 }}>{error}</p>}
 
       {results && (
-        <table style={{ marginTop: 20, borderCollapse: "collapse", width: "100%" }}>
+        <table style={{ marginTop: 20, borderCollapse: "collapse", width: "100%", fontSize: 12 }}>
           <thead>
             <tr>
               <th style={cellStyle}>Charakter</th>
@@ -98,7 +118,9 @@ export default function LookupForm() {
           <tbody>
             {results.map((r) => (
               <tr key={r.key}>
-                <td style={cellStyle}>{r.key}</td>
+                <td style={{ ...cellStyle, color: r.className ? CLASS_COLORS[r.className] : undefined, fontWeight: 600 }}>
+                  {r.name}
+                </td>
                 <td style={cellStyle}>{r.found ? r.best!.toFixed(1) : r.error ? "Fehler" : "keine Logs"}</td>
                 <td style={cellStyle}>{r.found ? r.median!.toFixed(1) : ""}</td>
                 <td style={cellStyle}>{r.found ? r.runs : ""}</td>

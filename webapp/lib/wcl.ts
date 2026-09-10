@@ -92,10 +92,38 @@ export function toServerSlug(realm: string): string {
     .replace(/^-+|-+$/g, "");
 }
 
+// Standard WoW class colors (RAID_CLASS_COLORS), keyed by the class name as
+// returned in gameData.global.character_class.name.
+export const CLASS_COLORS: Record<string, string> = {
+  "Death Knight": "#C41F3B",
+  "Demon Hunter": "#A330C9",
+  Druid: "#FF7C0A",
+  Evoker: "#33937F",
+  Hunter: "#AAD372",
+  Mage: "#3FC7EB",
+  Monk: "#00FF98",
+  Paladin: "#F58CBA",
+  Priest: "#FFFFFF",
+  Rogue: "#FFF468",
+  Shaman: "#0070DD",
+  Warlock: "#8788EE",
+  Warrior: "#C69B6D",
+};
+
 export interface ZoneRankings {
   bestPerformanceAverage: number | null;
   medianPerformanceAverage: number | null;
   rankings: { totalKills: number }[] | null;
+}
+
+export interface CharacterProfile {
+  zoneRankings: ZoneRankings | null;
+  // Human-readable class name (e.g. "Death Knight"), or null if WCL hasn't
+  // cached Blizzard game data for this character. NOT the same as WCL's own
+  // `classID` field -- that uses WCL's internal numbering (verified live:
+  // classID 1 for a real Death Knight, not Blizzard's official ID 6) and is
+  // deliberately not used here to avoid miscoloring names.
+  className: string | null;
 }
 
 // metric: playerscore (WCL's default M+ ranking metric -- a composite score
@@ -107,43 +135,65 @@ export interface ZoneRankings {
 // (17.49/12.05, and totalKills summing to exactly the displayed Runs
 // count). "default" resolves to the same thing server-side; playerscore is
 // used explicitly here to be unambiguous.
-const ZONE_RANKINGS_QUERY = `
+//
+// gameData is WCL's cached copy of Blizzard's own character profile API
+// response (no extra live Blizzard call -- same cost as the rest of this
+// query); we only need character_class.name out of it.
+const CHARACTER_PROFILE_QUERY = `
 query($name: String!, $serverSlug: String!, $serverRegion: String!, $zoneID: Int!, $partition: Int!) {
   characterData {
     character(name: $name, serverSlug: $serverSlug, serverRegion: $serverRegion) {
+      gameData
       zoneRankings(zoneID: $zoneID, partition: $partition, metric: playerscore)
     }
   }
 }`;
 
-interface CharacterZoneRankingsData {
+interface RawCharacterProfileData {
   characterData: {
-    character: { zoneRankings: ZoneRankings | null } | null;
+    character: { gameData: unknown; zoneRankings: ZoneRankings | null } | null;
   };
 }
 
-// getCharacterZoneRankings returns:
+function extractClassName(gameData: unknown): string | null {
+  if (!gameData || typeof gameData !== "object") {
+    return null;
+  }
+  const g = gameData as { global?: { character_class?: { name?: string } } };
+  return g.global?.character_class?.name ?? null;
+}
+
+// getCharacterProfile returns:
 //   - null if WCL doesn't know this name/realm/region combination at all
-//   - a ZoneRankings with bestPerformanceAverage === null if the character
-//     is known but has no logs for this specific zone/partition (verified
-//     live: WCL returns an object with all-null fields here, not a JSON
-//     null -- see hasData())
-//   - a ZoneRankings with real data otherwise
-export async function getCharacterZoneRankings(
+//   - a profile with zoneRankings.bestPerformanceAverage === null if the
+//     character is known but has no logs for this specific zone/partition
+//     (verified live: WCL returns an object with all-null fields here, not
+//     a JSON null -- see hasData())
+//   - a profile with real zoneRankings data otherwise
+// className is populated independently of zoneRankings whenever WCL has
+// cached game data for the character.
+export async function getCharacterProfile(
   name: string,
   serverSlug: string,
   serverRegion: string,
   zoneID: number,
   partition: number
-): Promise<ZoneRankings | null> {
-  const data = await wclGraphQL<CharacterZoneRankingsData>(ZONE_RANKINGS_QUERY, {
+): Promise<CharacterProfile | null> {
+  const data = await wclGraphQL<RawCharacterProfileData>(CHARACTER_PROFILE_QUERY, {
     name,
     serverSlug,
     serverRegion,
     zoneID,
     partition,
   });
-  return data.characterData.character?.zoneRankings ?? null;
+  const char = data.characterData.character;
+  if (!char) {
+    return null;
+  }
+  return {
+    zoneRankings: char.zoneRankings,
+    className: extractClassName(char.gameData),
+  };
 }
 
 export function hasData(zr: ZoneRankings | null): zr is ZoneRankings & { bestPerformanceAverage: number } {
