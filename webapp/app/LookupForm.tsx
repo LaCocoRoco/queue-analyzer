@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, type CSSProperties, type FormEvent } from "react";
+import { useState, type CSSProperties } from "react";
 
 interface LookupResult {
   key: string;
@@ -16,7 +16,6 @@ interface LookupResult {
 const cellStyle: CSSProperties = { border: "1px solid #333", padding: "6px 10px", textAlign: "left" };
 
 export default function LookupForm() {
-  const [input, setInput] = useState("");
   const [results, setResults] = useState<LookupResult[] | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -54,23 +53,15 @@ export default function LookupForm() {
   async function handleClipboardLookup() {
     setError(null);
     if (!navigator.clipboard?.readText) {
-      setError(
-        "Zwischenablage-Zugriff nicht verfuegbar (braucht HTTPS oder localhost). Bitte unten manuell einfuegen."
-      );
+      setError("Zwischenablage-Zugriff nicht verfuegbar (braucht HTTPS oder localhost).");
       return;
     }
     try {
       const text = await navigator.clipboard.readText();
-      setInput(text);
       await runLookup(text);
     } catch {
-      setError("Zugriff auf die Zwischenablage wurde verweigert. Bitte unten manuell einfuegen.");
+      setError("Zugriff auf die Zwischenablage wurde verweigert.");
     }
-  }
-
-  function handleSubmit(e: FormEvent) {
-    e.preventDefault();
-    void runLookup(input);
   }
 
   return (
@@ -87,52 +78,10 @@ export default function LookupForm() {
           borderRadius: 6,
           fontWeight: 600,
           cursor: loading ? "default" : "pointer",
-          marginBottom: 16,
         }}
       >
         {loading ? "Frage ab..." : "Aus Zwischenablage abfragen"}
       </button>
-
-      <details>
-        <summary style={{ color: "#888", cursor: "pointer", fontSize: 13 }}>
-          Manuell einfügen (falls Zwischenablage-Zugriff nicht klappt)
-        </summary>
-        <form onSubmit={handleSubmit} style={{ marginTop: 10 }}>
-          <textarea
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            placeholder={"Name-Realm, eine Zeile pro Person\n(im Spiel: Queue Analyzer oeffnen, Strg+A, Strg+C, hier einfuegen)"}
-            rows={8}
-            style={{
-              width: "100%",
-              boxSizing: "border-box",
-              fontFamily: "monospace",
-              fontSize: 14,
-              padding: 10,
-              background: "#1b1f24",
-              color: "#e8e8e8",
-              border: "1px solid #333",
-              borderRadius: 6,
-            }}
-          />
-          <button
-            type="submit"
-            disabled={loading || input.trim() === ""}
-            style={{
-              marginTop: 10,
-              padding: "8px 16px",
-              background: loading ? "#2a2f36" : "#3fc7eb",
-              color: loading ? "#888" : "#0a0a0a",
-              border: "none",
-              borderRadius: 6,
-              fontWeight: 600,
-              cursor: loading ? "default" : "pointer",
-            }}
-          >
-            {loading ? "Frage ab..." : "Abfragen"}
-          </button>
-        </form>
-      </details>
 
       {error && <p style={{ color: "#ff6b6b", marginTop: 12 }}>{error}</p>}
 
