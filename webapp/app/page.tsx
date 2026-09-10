@@ -6,7 +6,7 @@ export default function Page() {
       style={{
         maxWidth: 400,
         margin: "40px auto",
-        padding: "0 16px",
+        padding: "0 10px",
         fontFamily: "system-ui, sans-serif",
       }}
     >

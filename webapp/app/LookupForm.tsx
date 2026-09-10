@@ -33,7 +33,21 @@ const CLASS_COLORS: Record<string, string> = {
   Warrior: "#C69B6D",
 };
 
-const cellStyle: CSSProperties = { border: "1px solid #333", padding: "3px 8px", textAlign: "left" };
+const cellStyle: CSSProperties = {
+  border: "1px solid #333",
+  padding: "3px 3px",
+  textAlign: "left",
+};
+
+// Best/Median/Runs share one fixed width, sized to comfortably fit the
+// widest of the three ("Median") plus typical values -- no wider than
+// that, and all three equal instead of each auto-sizing independently.
+const numericCellStyle: CSSProperties = {
+  ...cellStyle,
+  width: 56,
+  whiteSpace: "nowrap",
+  textAlign: "right",
+};
 
 export default function LookupForm() {
   const [results, setResults] = useState<LookupResult[] | null>(null);
@@ -73,7 +87,9 @@ export default function LookupForm() {
   async function handleClipboardLookup() {
     setError(null);
     if (!navigator.clipboard?.readText) {
-      setError("Zwischenablage-Zugriff nicht verfuegbar (braucht HTTPS oder localhost).");
+      setError(
+        "Zwischenablage-Zugriff nicht verfuegbar (braucht HTTPS oder localhost).",
+      );
       return;
     }
     try {
@@ -106,24 +122,43 @@ export default function LookupForm() {
       {error && <p style={{ color: "#ff6b6b", marginTop: 12 }}>{error}</p>}
 
       {results && (
-        <table style={{ marginTop: 20, borderCollapse: "collapse", width: "100%", fontSize: 12 }}>
+        <table
+          style={{
+            marginTop: 20,
+            borderCollapse: "collapse",
+            width: "100%",
+            fontSize: 12,
+          }}
+        >
           <thead>
             <tr>
               <th style={cellStyle}>Charakter</th>
-              <th style={cellStyle}>Best %</th>
-              <th style={cellStyle}>Median %</th>
-              <th style={cellStyle}>Runs</th>
+              <th style={numericCellStyle}>Best</th>
+              <th style={numericCellStyle}>Median</th>
+              <th style={numericCellStyle}>Runs</th>
             </tr>
           </thead>
           <tbody>
             {results.map((r) => (
               <tr key={r.key}>
-                <td style={{ ...cellStyle, color: r.className ? CLASS_COLORS[r.className] : undefined, fontWeight: 600 }}>
+                <td
+                  style={{
+                    ...cellStyle,
+                    color: r.className ? CLASS_COLORS[r.className] : undefined,
+                    fontWeight: 600,
+                  }}
+                >
                   {r.name}
                 </td>
-                <td style={cellStyle}>{r.found ? r.best!.toFixed(1) : r.error ? "Fehler" : "keine Logs"}</td>
-                <td style={cellStyle}>{r.found ? r.median!.toFixed(1) : ""}</td>
-                <td style={cellStyle}>{r.found ? r.runs : ""}</td>
+                <td style={numericCellStyle}>
+                  {r.found
+                    ? r.best!.toFixed(1)
+                    : r.error
+                      ? "Fehler"
+                      : "keine Logs"}
+                </td>
+                <td style={numericCellStyle}>{r.found ? r.median!.toFixed(1) : ""}</td>
+                <td style={numericCellStyle}>{r.found ? r.runs : ""}</td>
               </tr>
             ))}
           </tbody>
