@@ -88,9 +88,6 @@ export default function LookupForm() {
           >
             {loading ? "Frage ab..." : "Abfragen"}
           </button>
-          <a href="/api/auth/logout" style={{ color: "#888", fontSize: 13 }}>
-            Ausloggen
-          </a>
         </div>
       </form>
 

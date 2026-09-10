@@ -1,86 +1,52 @@
 // lib/wcl.ts
 //
-// WarcraftLogs API v2 OAuth (Authorization Code flow) + GraphQL client.
+// WarcraftLogs API v2 client -- client-credentials flow only.
 //
-// NOT independently verified end-to-end -- this environment has no way to
-// click through a real browser OAuth consent screen. Everything here is
-// built from WCL's documented OAuth endpoints (confirmed: authorize_uri
-// https://www.warcraftlogs.com/oauth/authorize, token_uri
-// https://www.warcraftlogs.com/oauth/token -- both same as the previously
-// working client-credentials flow) plus the GraphQL query shape we already
-// verified live against the client-credentials flow (see git history of
-// the deleted Go tool). The one open question: WCL's docs mention a
-// separate "/api/v2/user" endpoint for user-authorized tokens (as opposed
-// to "/api/v2/client" for client-credentials tokens) -- WCL_API_ENDPOINT
-// below defaults to that, but flip it via env var if the first real login
-// shows otherwise (see webapp/README.md).
+// This app is for personal/single-deployment use, sitting behind your own
+// access control (e.g. Authentik) -- so it holds one server-side
+// WCL_CLIENT_ID/WCL_CLIENT_SECRET pair and uses it for every request. No
+// per-user login: confirmed live (two different WCL accounts, same
+// registered client) that WCL's rate limit is tracked per API client, not
+// per logged-in user -- so a login screen would not have given separate
+// quotas anyway, just extra complexity.
 
-const AUTHORIZE_URL = "https://www.warcraftlogs.com/oauth/authorize";
 const TOKEN_URL = "https://www.warcraftlogs.com/oauth/token";
+const API_ENDPOINT = "https://www.warcraftlogs.com/api/v2/client";
 
 const CLIENT_ID = process.env.WCL_CLIENT_ID ?? "";
 const CLIENT_SECRET = process.env.WCL_CLIENT_SECRET ?? "";
-const REDIRECT_URI = process.env.WCL_REDIRECT_URI ?? "";
-const API_ENDPOINT = process.env.WCL_API_ENDPOINT ?? "https://www.warcraftlogs.com/api/v2/user";
 
-export function buildAuthorizeUrl(state: string): string {
-  const params = new URLSearchParams({
-    client_id: CLIENT_ID,
-    redirect_uri: REDIRECT_URI,
-    response_type: "code",
-    state,
-  });
-  return `${AUTHORIZE_URL}?${params.toString()}`;
+interface CachedToken {
+  accessToken: string;
+  expiresAt: number; // epoch ms
 }
 
-export interface TokenResponse {
-  access_token: string;
-  refresh_token?: string;
-  expires_in: number;
-  token_type: string;
-}
+// Module-level cache: one token shared by every request this server
+// process handles. Fine for a single-instance personal deployment.
+let cachedToken: CachedToken | null = null;
 
-function basicAuthHeader(): string {
-  return "Basic " + Buffer.from(`${CLIENT_ID}:${CLIENT_SECRET}`).toString("base64");
-}
+async function getAccessToken(): Promise<string> {
+  if (cachedToken && Date.now() < cachedToken.expiresAt - 60_000) {
+    return cachedToken.accessToken;
+  }
 
-export async function exchangeCodeForToken(code: string): Promise<TokenResponse> {
+  const basicAuth = "Basic " + Buffer.from(`${CLIENT_ID}:${CLIENT_SECRET}`).toString("base64");
   const res = await fetch(TOKEN_URL, {
     method: "POST",
     headers: {
       "Content-Type": "application/x-www-form-urlencoded",
-      Authorization: basicAuthHeader(),
+      Authorization: basicAuth,
     },
-    body: new URLSearchParams({
-      grant_type: "authorization_code",
-      code,
-      redirect_uri: REDIRECT_URI,
-    }),
+    body: new URLSearchParams({ grant_type: "client_credentials" }),
     cache: "no-store",
   });
   if (!res.ok) {
-    throw new Error(`Token-Austausch fehlgeschlagen (${res.status}): ${await res.text()}`);
+    throw new Error(`WCL-Token-Request fehlgeschlagen (${res.status}): ${await res.text()}`);
   }
-  return res.json();
-}
 
-export async function refreshAccessToken(refreshToken: string): Promise<TokenResponse> {
-  const res = await fetch(TOKEN_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/x-www-form-urlencoded",
-      Authorization: basicAuthHeader(),
-    },
-    body: new URLSearchParams({
-      grant_type: "refresh_token",
-      refresh_token: refreshToken,
-    }),
-    cache: "no-store",
-  });
-  if (!res.ok) {
-    throw new Error(`Token-Refresh fehlgeschlagen (${res.status}): ${await res.text()}`);
-  }
-  return res.json();
+  const data = (await res.json()) as { access_token: string; expires_in: number };
+  cachedToken = { accessToken: data.access_token, expiresAt: Date.now() + data.expires_in * 1000 };
+  return cachedToken.accessToken;
 }
 
 interface GraphQLResponse<T> {
@@ -88,11 +54,9 @@ interface GraphQLResponse<T> {
   errors?: { message: string }[];
 }
 
-export async function wclGraphQL<T>(
-  accessToken: string,
-  query: string,
-  variables: Record<string, unknown>
-): Promise<T> {
+async function wclGraphQL<T>(query: string, variables: Record<string, unknown>): Promise<T> {
+  const accessToken = await getAccessToken();
+
   const res = await fetch(API_ENDPOINT, {
     method: "POST",
     headers: {
@@ -116,8 +80,7 @@ export async function wclGraphQL<T>(
 }
 
 // Best-effort realm-name -> WCL server-slug conversion (lowercase, no
-// apostrophes, everything else collapsed to hyphens). Mirrors the same
-// logic used by the addon/tool before this rewrite. A handful of realms
+// apostrophes, everything else collapsed to hyphens). A handful of realms
 // have a WCL slug that doesn't derive mechanically from the display name;
 // if a character never resolves, check their WCL profile URL for the
 // actual slug.
@@ -154,18 +117,17 @@ interface CharacterZoneRankingsData {
 //   - null if WCL doesn't know this name/realm/region combination at all
 //   - a ZoneRankings with bestPerformanceAverage === null if the character
 //     is known but has no logs for this specific zone/partition (verified
-//     live against the client-credentials flow: WCL returns an object with
-//     all-null fields here, not a JSON null -- see hasData())
+//     live: WCL returns an object with all-null fields here, not a JSON
+//     null -- see hasData())
 //   - a ZoneRankings with real data otherwise
 export async function getCharacterZoneRankings(
-  accessToken: string,
   name: string,
   serverSlug: string,
   serverRegion: string,
   zoneID: number,
   partition: number
 ): Promise<ZoneRankings | null> {
-  const data = await wclGraphQL<CharacterZoneRankingsData>(accessToken, ZONE_RANKINGS_QUERY, {
+  const data = await wclGraphQL<CharacterZoneRankingsData>(ZONE_RANKINGS_QUERY, {
     name,
     serverSlug,
     serverRegion,

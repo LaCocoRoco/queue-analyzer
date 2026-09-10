@@ -1,14 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getSession, setSession, SessionData } from "@/lib/session";
-import { getCharacterZoneRankings, hasData, runsEstimate, refreshAccessToken, toServerSlug } from "@/lib/wcl";
+import { getCharacterZoneRankings, hasData, runsEstimate, toServerSlug } from "@/lib/wcl";
 
 const ZONE_ID = Number(process.env.WCL_ZONE_ID);
 const PARTITION = Number(process.env.WCL_PARTITION);
 const REGION = process.env.WCL_REGION ?? "EU";
 
 // Paces requests at ~3430/hour, safely under WCL's measured ~3600
-// points/hour budget (1 point per query) -- same figure the earlier Go
-// tool used, verified live against the client-credentials flow.
+// points/hour budget (1 point per query).
 const REQUEST_INTERVAL_MS = 1050;
 
 export interface LookupResult {
@@ -29,43 +27,18 @@ function sleep(ms: number) {
 function parseNameRealm(line: string): { name: string; realm: string } | null {
   // Character names never contain "-"; realm names emitted by the addon
   // have spaces stripped but no hyphens inserted -- so the FIRST "-" is
-  // always the correct split point (mirrors the Go tool's SplitN(key,
-  // "-", 2) behavior).
+  // always the correct split point.
   const idx = line.indexOf("-");
   if (idx <= 0 || idx === line.length - 1) return null;
   return { name: line.slice(0, idx), realm: line.slice(idx + 1) };
 }
 
 export async function POST(req: NextRequest) {
-  let session = getSession();
-  if (!session) {
-    return NextResponse.json({ error: "Nicht eingeloggt" }, { status: 401 });
-  }
-
   if (!ZONE_ID || !PARTITION) {
     return NextResponse.json(
       { error: "Server-Konfiguration unvollstaendig: WCL_ZONE_ID/WCL_PARTITION nicht gesetzt" },
       { status: 500 }
     );
-  }
-
-  // Refresh the access token if it's about to expire.
-  if (Date.now() >= session.expiresAt - 30_000) {
-    if (!session.refreshToken) {
-      return NextResponse.json({ error: "Sitzung abgelaufen, bitte neu einloggen" }, { status: 401 });
-    }
-    try {
-      const token = await refreshAccessToken(session.refreshToken);
-      const refreshed: SessionData = {
-        accessToken: token.access_token,
-        refreshToken: token.refresh_token ?? session.refreshToken,
-        expiresAt: Date.now() + token.expires_in * 1000,
-      };
-      setSession(refreshed);
-      session = refreshed;
-    } catch {
-      return NextResponse.json({ error: "Sitzung abgelaufen, bitte neu einloggen" }, { status: 401 });
-    }
   }
 
   let rawNames: unknown;
@@ -89,7 +62,6 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Keine gueltigen \"Name-Realm\" Eintraege gefunden" }, { status: 400 });
   }
 
-  const accessToken = session.accessToken;
   const results: LookupResult[] = [];
 
   for (let i = 0; i < entries.length; i++) {
@@ -98,7 +70,7 @@ export async function POST(req: NextRequest) {
     const slug = toServerSlug(realm);
 
     try {
-      const zr = await getCharacterZoneRankings(accessToken, name, slug, REGION, ZONE_ID, PARTITION);
+      const zr = await getCharacterZoneRankings(name, slug, REGION, ZONE_ID, PARTITION);
       if (hasData(zr)) {
         results.push({
           key,
