@@ -98,11 +98,20 @@ export interface ZoneRankings {
   rankings: { totalKills: number }[] | null;
 }
 
+// metric: playerscore (WCL's default M+ ranking metric -- a composite score
+// per run, NOT raw damage-per-second) is what the character page's default
+// landing view ("Points" tab) and its "Best/Median DPS % Avg" labels
+// actually show. Confirmed live against a real character: metric: dps gave
+// wrong numbers (7.8/5.76 and a Runs undercount from a different
+// totalKills breakdown), metric: playerscore matched the website exactly
+// (17.49/12.05, and totalKills summing to exactly the displayed Runs
+// count). "default" resolves to the same thing server-side; playerscore is
+// used explicitly here to be unambiguous.
 const ZONE_RANKINGS_QUERY = `
 query($name: String!, $serverSlug: String!, $serverRegion: String!, $zoneID: Int!, $partition: Int!) {
   characterData {
     character(name: $name, serverSlug: $serverSlug, serverRegion: $serverRegion) {
-      zoneRankings(zoneID: $zoneID, partition: $partition, metric: dps)
+      zoneRankings(zoneID: $zoneID, partition: $partition, metric: playerscore)
     }
   }
 }`;
