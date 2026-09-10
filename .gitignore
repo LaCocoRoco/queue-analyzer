@@ -1,0 +1,10 @@
+# webapp (Next.js)
+webapp/node_modules/
+webapp/.next/
+webapp/.env
+webapp/.env.local
+webapp/npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
