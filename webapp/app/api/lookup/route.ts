@@ -5,9 +5,16 @@ const ZONE_ID = Number(process.env.WCL_ZONE_ID);
 const PARTITION = Number(process.env.WCL_PARTITION);
 const REGION = process.env.WCL_REGION ?? "EU";
 
-// Paces requests at ~3430/hour, safely under WCL's measured ~3600
-// points/hour budget (1 point per query).
-const REQUEST_INTERVAL_MS = 1050;
+// How many WCL requests to run at once. WCL's rate limit is a points/hour
+// budget (~3600/hour, ~1 point/query -- see lib/wcl.ts) which a typical
+// Group Finder batch (a few dozen names) barely dents, so the hourly
+// budget isn't the binding constraint here -- it's whatever undocumented
+// per-second/burst protection WCL's API may have (one forum report
+// mentioned 429s after a few hundred rapid requests). 5 concurrent
+// requests is a conservative middle ground: much faster than one-at-a-time
+// without hammering the API. Raise it if this proves too conservative in
+// practice.
+const CONCURRENCY = 5;
 
 export interface LookupResult {
   key: string;
@@ -21,10 +28,6 @@ export interface LookupResult {
   error?: string;
 }
 
-function sleep(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 function parseNameRealm(line: string): { name: string; realm: string } | null {
   // Character names never contain "-"; realm names emitted by the addon
   // have spaces stripped but no hyphens inserted -- so the FIRST "-" is
@@ -32,6 +35,52 @@ function parseNameRealm(line: string): { name: string; realm: string } | null {
   const idx = line.indexOf("-");
   if (idx <= 0 || idx === line.length - 1) return null;
   return { name: line.slice(0, idx), realm: line.slice(idx + 1) };
+}
+
+async function lookupOne(name: string, realm: string): Promise<LookupResult> {
+  const key = `${name}-${realm}`;
+  const slug = toServerSlug(realm);
+
+  try {
+    const profile = await getCharacterProfile(name, slug, REGION, ZONE_ID, PARTITION);
+    const zr = profile?.zoneRankings ?? null;
+    if (hasData(zr)) {
+      return {
+        key,
+        name,
+        realm,
+        className: profile!.className,
+        found: true,
+        best: zr.bestPerformanceAverage,
+        median: zr.medianPerformanceAverage ?? undefined,
+        runs: runsEstimate(zr),
+      };
+    }
+    return { key, name, realm, className: profile?.className ?? null, found: false };
+  } catch (err) {
+    return { key, name, realm, className: null, found: false, error: (err as Error).message };
+  }
+}
+
+// Runs `fn` over `items` with at most `concurrency` in flight at once --
+// each of `concurrency` workers pulls the next item off a shared index
+// until the list is exhausted, so results.length worth of work finishes in
+// about (items.length / concurrency) request-latencies instead of
+// items.length of them.
+async function mapWithConcurrency<T, R>(items: T[], concurrency: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let nextIndex = 0;
+
+  async function worker() {
+    while (true) {
+      const i = nextIndex++;
+      if (i >= items.length) return;
+      results[i] = await fn(items[i]);
+    }
+  }
+
+  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, worker));
+  return results;
 }
 
 export async function POST(req: NextRequest) {
@@ -63,38 +112,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Keine gueltigen \"Name-Realm\" Eintraege gefunden" }, { status: 400 });
   }
 
-  const results: LookupResult[] = [];
-
-  for (let i = 0; i < entries.length; i++) {
-    const { name, realm } = entries[i];
-    const key = `${name}-${realm}`;
-    const slug = toServerSlug(realm);
-
-    try {
-      const profile = await getCharacterProfile(name, slug, REGION, ZONE_ID, PARTITION);
-      const zr = profile?.zoneRankings ?? null;
-      if (hasData(zr)) {
-        results.push({
-          key,
-          name,
-          realm,
-          className: profile!.className,
-          found: true,
-          best: zr.bestPerformanceAverage,
-          median: zr.medianPerformanceAverage ?? undefined,
-          runs: runsEstimate(zr),
-        });
-      } else {
-        results.push({ key, name, realm, className: profile?.className ?? null, found: false });
-      }
-    } catch (err) {
-      results.push({ key, name, realm, className: null, found: false, error: (err as Error).message });
-    }
-
-    if (i < entries.length - 1) {
-      await sleep(REQUEST_INTERVAL_MS);
-    }
-  }
+  const results = await mapWithConcurrency(entries, CONCURRENCY, ({ name, realm }) => lookupOne(name, realm));
 
   return NextResponse.json({ results });
 }
