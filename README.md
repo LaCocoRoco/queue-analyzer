@@ -36,9 +36,16 @@ die Namen, die du sonst mühsam einzeln nachschlagen müsstest, und macht sie
 in einem Rutsch kopierbar:
 
 1. Du bist Gruppenleiter einer Anzeige mit Bewerbern.
-2. Tastenkombination drücken (oder `/qa`) -- Fenster öffnet sich, Textfeld
-   ist automatisch markiert.
-3. Strg+C -- alle Bewerbernamen sind in der Zwischenablage.
+2. Fenster öffnen, auf drei Arten (je nachdem was gerade bequemer ist):
+   - Tastenkombination (in den WoW-Keybindings unter "Queue Analyzer"
+     zuweisbar) oder `/qa`.
+   - Button "Bewerber kopieren" oben rechts im Bewerber-Fenster.
+   - Rechtsklick auf einen einzelnen Bewerber -- "Alle Bewerber kopieren
+     (Queue Analyzer)" im bestehenden Blizzard-Kontextmenü (Flüstern/
+     Melden), über Blizzards offizielle Menü-Erweiterungs-API
+     (`Menu.ModifyMenu`) eingehängt, keine eigene Klick-Logik.
+3. Textfeld ist automatisch markiert -- Strg+C, alle Bewerbernamen sind in
+   der Zwischenablage.
 4. In der Webanwendung (`webapp/`) einfügen, abfragen.
 
 ## Addon installieren

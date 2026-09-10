@@ -117,3 +117,48 @@ end
 SLASH_QUEUEANALYZER1 = "/qa"
 SLASH_QUEUEANALYZER2 = "/queueanalyzer"
 SlashCmdList["QUEUEANALYZER"] = QueueAnalyzer_ToggleExportFrame
+
+-- Right-click entry on individual applicants: right-clicking a member row
+-- already opens a Blizzard context menu (Whisper/Report), built with the
+-- modern Menu API and tagged "MENU_LFG_FRAME_MEMBER_APPLY" (confirmed
+-- against Blizzard's own LFGListApplicantMember_OnMouseDown). Menu.ModifyMenu
+-- is Blizzard's sanctioned extension point for exactly this -- no click
+-- hijacking, no taint risk. Safe to register immediately; it fires
+-- whenever that menu is opened, regardless of load order.
+if Menu and Menu.ModifyMenu then
+	Menu.ModifyMenu("MENU_LFG_FRAME_MEMBER_APPLY", function(owner, rootDescription)
+		rootDescription:CreateDivider()
+		rootDescription:CreateButton("Alle Bewerber kopieren (Queue Analyzer)", QueueAnalyzer_ToggleExportFrame)
+	end)
+end
+
+-- Button above the applicant list. LFGListFrame only exists once the
+-- Blizzard_GroupFinder addon has loaded (it's load-on-demand), so this
+-- waits for that before creating/parenting the button.
+local function AddApplicationViewerButton()
+	local panel = LFGListFrame.ApplicationViewer
+	if not panel or panel.QueueAnalyzerButton then
+		return
+	end
+
+	local button = CreateFrame("Button", nil, panel, "UIPanelButtonTemplate")
+	button:SetSize(150, 20)
+	button:SetText("Bewerber kopieren")
+	button:SetPoint("TOPRIGHT", panel, "TOPRIGHT", -6, -4)
+	button:SetScript("OnClick", QueueAnalyzer_ToggleExportFrame)
+	panel.QueueAnalyzerButton = button
+end
+
+local loader = CreateFrame("Frame")
+loader:RegisterEvent("ADDON_LOADED")
+loader:SetScript("OnEvent", function(_, _, addonName)
+	if addonName == "Blizzard_GroupFinder" then
+		AddApplicationViewerButton()
+	end
+end)
+
+-- Blizzard_GroupFinder may already be loaded by the time we get here
+-- (e.g. after a /reload while the group finder was open).
+if C_AddOns and C_AddOns.IsAddOnLoaded and C_AddOns.IsAddOnLoaded("Blizzard_GroupFinder") then
+	AddApplicationViewerButton()
+end
