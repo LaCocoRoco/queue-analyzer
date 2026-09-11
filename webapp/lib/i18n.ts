@@ -57,7 +57,7 @@ const de: Dict = {
   onboardingHeading: "WarcraftLogs Zugangsdaten",
   introInstruction: "Erstelle deinen eigenen API-Client auf",
   introStore:
-    "Trage danach Client ID und Client Secret unten ein. Beide werden ausschliesslich lokal in deinem Browser gespeichert und nur an diese Anwendung geschickt, nie an einen dritten Server.",
+    "Gib deine Client ID und Client Secret ein. Sie werden ausschließlich lokal in deinem Browser gespeichert.",
   clientIdPlaceholder: "Client ID",
   clientSecretPlaceholder: "Client Secret",
   saveButton: "Speichern",
