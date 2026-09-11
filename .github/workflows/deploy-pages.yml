@@ -1,0 +1,66 @@
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "webapp/**"
+      - ".github/workflows/deploy-pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Only one deployment at a time; a push while one is running cancels the
+# older run in favor of the newer one instead of queueing.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: webapp
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: webapp/package-lock.json
+
+      - run: npm ci
+
+      # NEXT_PUBLIC_* are inlined into the browser bundle at build time --
+      # not secrets, just the public WCL season config (see .env.example).
+      # Configure these once under Settings -> Secrets and variables ->
+      # Actions -> Variables (repository variables, not secrets).
+      - run: npm run build
+        env:
+          NEXT_PUBLIC_WCL_REGION: ${{ vars.WCL_REGION }}
+          NEXT_PUBLIC_WCL_ZONE_ID: ${{ vars.WCL_ZONE_ID }}
+          NEXT_PUBLIC_WCL_PARTITION: ${{ vars.WCL_PARTITION }}
+          # Project page (github.com/<user>/queue-analyzer), so it's served
+          # under /queue-analyzer/, not at the domain root.
+          NEXT_PUBLIC_BASE_PATH: /queue-analyzer
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: webapp/out
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

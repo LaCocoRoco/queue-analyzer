@@ -1,196 +1,257 @@
 "use client";
 
-import { useState, type CSSProperties } from "react";
+import { useEffect, useState, type CSSProperties } from "react";
+import { clearCredentials, loadCredentials, saveCredentials, type WclCredentials } from "@/lib/credentials";
+import { detectLocale, DICTS, DEFAULT_LOCALE } from "@/lib/i18n";
+import { LookupError, runLookup, type LookupResult } from "@/lib/lookup";
+import { validateCredentials } from "@/lib/wcl";
 
-interface LookupResult {
-  key: string;
-  name: string;
-  realm: string;
-  classId: number | null;
-  found: boolean;
-  best: number;
-  median: number;
-  runs: number;
-  error?: string;
+// Flat ":"-delimited "Name-Realm:Best:Name-Realm:Best:..." -- the format
+// the addon's import window parses (see Core.lua's ParseImportText). A
+// single line pastes far more reliably into WoW's EditBox than a
+// multi-line block. Safe because names/realms never contain ":".
+function toExportString(results: LookupResult[]): string {
+  return results
+    .filter((r) => !r.error)
+    .flatMap((r) => [r.key, r.best.toFixed(1)])
+    .join(":");
 }
 
-// Standard WoW class colors (RAID_CLASS_COLORS), keyed by Blizzard's
-// official numeric class ID. Duplicated from lib/wcl.ts's CLASS_BY_ID on
-// purpose -- this is a client component, keep it free of the server-only
-// WCL client code. Keyed by ID, not name: gameData's class name is
-// localized (a German character came back as "Druide", not "Druid"),
-// while the numeric ID is stable regardless of locale.
-const CLASS_COLORS: Record<number, string> = {
-  1: "#C69B6D", // Warrior
-  2: "#F58CBA", // Paladin
-  3: "#AAD372", // Hunter
-  4: "#FFF468", // Rogue
-  5: "#FFFFFF", // Priest
-  6: "#C41F3B", // Death Knight
-  7: "#0070DD", // Shaman
-  8: "#3FC7EB", // Mage
-  9: "#8788EE", // Warlock
-  10: "#00FF98", // Monk
-  11: "#FF7C0A", // Druid
-  12: "#A330C9", // Demon Hunter
-  13: "#33937F", // Evoker
+type ButtonState = "idle" | "loading" | "done" | "error";
+
+const BUTTON_COLOR: Record<ButtonState, { bg: string; fg: string }> = {
+  idle: { bg: "#3fc7eb", fg: "#0a0a0a" },
+  loading: { bg: "#ff8000", fg: "#0a0a0a" },
+  done: { bg: "#1eff00", fg: "#0a0a0a" },
+  error: { bg: "#ff4d4d", fg: "#fff" },
 };
 
-// WarcraftLogs' own parse-percentile color tiers -- confirmed via multiple
-// independent sources (couldn't pull exact hex values directly off WCL's
-// site, it blocks automated requests; these are the standard values also
-// used for WoW's own item-quality colors, which WCL's grey/green/blue/
-// purple/orange naming deliberately mirrors).
-function percentileColor(pct: number): string {
-  if (pct >= 95) return "#FF8000"; // orange
-  if (pct >= 75) return "#A335EE"; // purple
-  if (pct >= 50) return "#0070DD"; // blue
-  if (pct >= 25) return "#1EFF00"; // green
-  return "#9D9D9D"; // grey
-}
-
-// As tight as possible: no vertical padding, just enough horizontal gap to
-// keep adjacent columns from visually merging.
-const cellStyle: CSSProperties = {
+const inputStyle: CSSProperties = {
+  padding: "8px 10px",
+  background: "#1a1d21",
+  color: "#fff",
   border: "1px solid #333",
-  padding: "0 4px",
-  textAlign: "left",
-  lineHeight: 1.6,
-};
-
-// Best/Median/Runs share one fixed width, sized to comfortably fit the
-// widest of the three ("Median") plus typical values -- no wider than
-// that, and all three equal instead of each auto-sizing independently.
-const numericCellStyle: CSSProperties = {
-  ...cellStyle,
-  width: 56,
-  whiteSpace: "nowrap",
+  borderRadius: 6,
+  fontSize: 14,
 };
 
 export default function LookupForm() {
-  const [results, setResults] = useState<LookupResult[] | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  // Detected once on mount from navigator.languages -- no account/profile to
+  // store an explicit preference in, and the default (en, matching SSR/the
+  // static prerender) is a fine placeholder until the client-only detection
+  // runs.
+  const [locale, setLocale] = useState(DEFAULT_LOCALE);
+  const t = DICTS[locale];
 
-  async function runLookup(rawText: string) {
-    const names = rawText
-      .split("\n")
-      .map((l) => l.trim())
-      .filter(Boolean);
-    if (names.length === 0) return;
+  const [credsLoading, setCredsLoading] = useState(true);
+  const [creds, setCreds] = useState<WclCredentials | null>(null);
 
-    setLoading(true);
-    setError(null);
-    setResults(null);
+  const [clientIdInput, setClientIdInput] = useState("");
+  const [clientSecretInput, setClientSecretInput] = useState("");
+  const [validating, setValidating] = useState(false);
+  const [validationError, setValidationError] = useState<string | null>(null);
 
-    try {
-      const res = await fetch("/api/lookup", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ names }),
-      });
-      const body = await res.json();
-      if (!res.ok) {
-        setError(body.error ?? `Fehler (${res.status})`);
-      } else {
-        setResults(body.results as LookupResult[]);
-      }
-    } catch (err) {
-      setError((err as Error).message);
-    } finally {
-      setLoading(false);
-    }
-  }
+  const [buttonState, setButtonState] = useState<ButtonState>("idle");
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  async function handleClipboardLookup() {
-    setError(null);
-    if (!navigator.clipboard?.readText) {
-      setError(
-        "Zwischenablage-Zugriff nicht verfuegbar (braucht HTTPS oder localhost).",
-      );
+  useEffect(() => {
+    setLocale(detectLocale());
+    loadCredentials()
+      .then(setCreds)
+      .catch(() => setCreds(null))
+      .finally(() => setCredsLoading(false));
+  }, []);
+
+  async function handleSaveCredentials() {
+    setValidationError(null);
+    const clientId = clientIdInput.trim();
+    const clientSecret = clientSecretInput.trim();
+    if (!clientId || !clientSecret) {
+      setValidationError(t.validationEmptyError);
       return;
     }
+
+    setValidating(true);
     try {
-      const text = await navigator.clipboard.readText();
-      await runLookup(text);
-    } catch {
-      setError("Zugriff auf die Zwischenablage wurde verweigert.");
+      await validateCredentials(clientId, clientSecret);
+      const newCreds: WclCredentials = { clientId, clientSecret };
+      await saveCredentials(newCreds);
+      setCreds(newCreds);
+    } catch (err) {
+      setValidationError((err as Error).message);
+    } finally {
+      setValidating(false);
     }
   }
+
+  async function handleResetCredentials() {
+    await clearCredentials();
+    setCreds(null);
+    setClientIdInput("");
+    setClientSecretInput("");
+  }
+
+  async function handleReadFromClipboard() {
+    if (!creds || buttonState === "loading") return;
+    setErrorMessage(null);
+
+    if (!navigator.clipboard?.readText || !navigator.clipboard?.writeText) {
+      setErrorMessage(t.errorClipboardUnavailable);
+      setButtonState("error");
+      setTimeout(() => setButtonState("idle"), 2500);
+      return;
+    }
+
+    setButtonState("loading");
+    try {
+      const rawText = await navigator.clipboard.readText();
+      const names = rawText
+        .split(/[:\n]/)
+        .map((l) => l.trim())
+        .filter(Boolean);
+      if (names.length === 0) {
+        throw new Error(t.errorNoNames);
+      }
+
+      const results = await runLookup(names, creds.clientId, creds.clientSecret);
+      await navigator.clipboard.writeText(toExportString(results));
+
+      setButtonState("done");
+      setTimeout(() => setButtonState("idle"), 1800);
+    } catch (err) {
+      const message =
+        err instanceof LookupError
+          ? err.code === "NO_VALID_ENTRIES"
+            ? t.noValidEntries
+            : t.configIncomplete
+          : (err as Error).message;
+      setErrorMessage(message);
+      setButtonState("error");
+      setTimeout(() => setButtonState("idle"), 2500);
+    }
+  }
+
+  if (credsLoading) {
+    return null;
+  }
+
+  if (!creds) {
+    return (
+      <div style={{ maxWidth: 520 }}>
+        <h2 style={{ fontSize: 18, marginBottom: 8 }}>{t.onboardingHeading}</h2>
+        <p style={{ fontSize: 14, lineHeight: 1.6, color: "#ccc" }}>
+          {t.introInstruction}{" "}
+          <a
+            href="https://www.warcraftlogs.com/api/clients/"
+            target="_blank"
+            rel="noreferrer"
+            style={{ color: "#3fc7eb" }}
+          >
+            warcraftlogs.com/api/clients
+          </a>
+          .
+        </p>
+        <p style={{ fontSize: 14, lineHeight: 1.6, color: "#ccc" }}>
+          Application Name: <b>analyzer</b>
+          <br />
+          Redirect URL: <b>http://analyzer.com</b>
+        </p>
+        <p style={{ fontSize: 14, lineHeight: 1.6, color: "#ccc" }}>{t.introStore}</p>
+
+        <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 16 }}>
+          <input
+            type="text"
+            placeholder={t.clientIdPlaceholder}
+            value={clientIdInput}
+            onChange={(e) => setClientIdInput(e.target.value)}
+            style={inputStyle}
+          />
+          <input
+            type="password"
+            placeholder={t.clientSecretPlaceholder}
+            value={clientSecretInput}
+            onChange={(e) => setClientSecretInput(e.target.value)}
+            style={inputStyle}
+          />
+          <button
+            type="button"
+            onClick={handleSaveCredentials}
+            disabled={validating}
+            style={{
+              padding: "10px 18px",
+              background: validating ? "#2a2f36" : "#3fc7eb",
+              color: validating ? "#888" : "#0a0a0a",
+              border: "none",
+              borderRadius: 6,
+              fontWeight: 600,
+              cursor: validating ? "default" : "pointer",
+            }}
+          >
+            {validating ? t.savingButton : t.saveButton}
+          </button>
+          {validationError && <p style={{ color: "#ff6b6b", margin: 0 }}>{validationError}</p>}
+        </div>
+      </div>
+    );
+  }
+
+  const colors = BUTTON_COLOR[buttonState];
 
   return (
     <div>
       <button
         type="button"
-        onClick={handleClipboardLookup}
-        disabled={loading}
+        onClick={handleReadFromClipboard}
+        disabled={buttonState === "loading"}
         style={{
+          display: "inline-grid",
           padding: "10px 18px",
-          background: loading ? "#2a2f36" : "#3fc7eb",
-          color: loading ? "#888" : "#0a0a0a",
+          background: colors.bg,
+          color: colors.fg,
           border: "none",
           borderRadius: 6,
           fontWeight: 600,
-          cursor: loading ? "default" : "pointer",
+          cursor: buttonState === "loading" ? "default" : "pointer",
         }}
       >
-        {loading ? "Frage ab..." : "Aus Zwischenablage abfragen"}
+        {/* All four labels are stacked in the same grid cell (only the
+            active one visible) so the grid track sizes to the widest of
+            them -- the button's width is then fixed across state changes
+            instead of jumping around as the text (and its length, which
+            varies per language) changes. */}
+        <span style={{ gridArea: "1 / 1", visibility: buttonState === "idle" ? "visible" : "hidden" }}>
+          {t.buttonIdle}
+        </span>
+        <span style={{ gridArea: "1 / 1", visibility: buttonState === "loading" ? "visible" : "hidden" }}>
+          <span className="qa-spinner" />
+          {t.buttonLoading}
+        </span>
+        <span style={{ gridArea: "1 / 1", visibility: buttonState === "done" ? "visible" : "hidden" }}>
+          {t.buttonDone}
+        </span>
+        <span style={{ gridArea: "1 / 1", visibility: buttonState === "error" ? "visible" : "hidden" }}>
+          {t.buttonErrorRetry}
+        </span>
       </button>
 
-      {error && <p style={{ color: "#ff6b6b", marginTop: 12 }}>{error}</p>}
+      {errorMessage && buttonState === "error" && <p style={{ color: "#ff6b6b", marginTop: 12 }}>{errorMessage}</p>}
 
-      {results && (
-        <table
+      <p style={{ marginTop: 20 }}>
+        <button
+          type="button"
+          onClick={handleResetCredentials}
           style={{
-            marginTop: 10,
-            borderCollapse: "collapse",
-            fontSize: 16,
+            background: "none",
+            border: "none",
+            color: "#888",
+            fontSize: 12,
+            cursor: "pointer",
+            padding: 0,
           }}
         >
-          <thead>
-            <tr>
-              <th style={cellStyle}>Charakter</th>
-              <th style={numericCellStyle}>Best</th>
-              <th style={numericCellStyle}>Median</th>
-              <th style={numericCellStyle}>Runs</th>
-            </tr>
-          </thead>
-          <tbody>
-            {results.map((r) => (
-              <tr key={r.key}>
-                <td
-                  style={{
-                    ...cellStyle,
-                    color: r.classId ? CLASS_COLORS[r.classId] : undefined,
-                    fontWeight: 600,
-                  }}
-                >
-                  {r.name}
-                </td>
-                <td
-                  style={{
-                    ...numericCellStyle,
-                    color: r.error ? undefined : percentileColor(r.best),
-                    fontWeight: 700,
-                  }}
-                >
-                  {r.error ? "Fehler" : r.best.toFixed(1)}
-                </td>
-                <td
-                  style={{
-                    ...numericCellStyle,
-                    color: r.error ? undefined : percentileColor(r.median),
-                    fontWeight: 700,
-                  }}
-                >
-                  {r.error ? "" : r.median.toFixed(1)}
-                </td>
-                <td style={numericCellStyle}>{r.error ? "" : r.runs}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
+          {t.logoutButton}
+        </button>
+      </p>
     </div>
   );
 }

@@ -1,9 +1,15 @@
-import { NextRequest, NextResponse } from "next/server";
-import { getCharacterProfile, hasData, runsEstimate, toServerSlug } from "@/lib/wcl";
+// lib/lookup.ts
+//
+// Orchestrates the actual WCL lookups for a pasted applicant list. Runs
+// entirely in the browser (see lib/wcl.ts for why that's safe/possible) --
+// this used to be a Next.js API route (server-side), moved here unchanged
+// in logic when the app became a static export with no server at all.
 
-const ZONE_ID = Number(process.env.WCL_ZONE_ID);
-const PARTITION = Number(process.env.WCL_PARTITION);
-const REGION = process.env.WCL_REGION ?? "EU";
+import { getCharacterProfile, hasData, runsEstimate, toServerSlug } from "./wcl";
+
+const REGION = process.env.NEXT_PUBLIC_WCL_REGION ?? "EU";
+const ZONE_ID = Number(process.env.NEXT_PUBLIC_WCL_ZONE_ID);
+const PARTITION = Number(process.env.NEXT_PUBLIC_WCL_PARTITION);
 
 // How many WCL requests to run at once. WCL's rate limit is a points/hour
 // budget (~3600/hour, ~1 point/query -- see lib/wcl.ts) which a typical
@@ -15,6 +21,19 @@ const REGION = process.env.WCL_REGION ?? "EU";
 // without hammering the API. Raise it if this proves too conservative in
 // practice.
 const CONCURRENCY = 5;
+
+// Thrown for the two user-facing failure cases here, carrying a stable code
+// instead of a hardcoded-language message -- the UI maps the code to the
+// current locale's translation (see lib/i18n.ts). Anything else (actual WCL
+// API errors) is left as a plain Error and shown as-is; those come from a
+// third party and aren't worth translating.
+export class LookupError extends Error {
+  code: "NO_VALID_ENTRIES" | "CONFIG_INCOMPLETE";
+  constructor(code: LookupError["code"]) {
+    super(code);
+    this.code = code;
+  }
+}
 
 export interface LookupResult {
   key: string;
@@ -40,12 +59,12 @@ function parseNameRealm(line: string): { name: string; realm: string } | null {
 // Returns null for characters whose current role is tank or healer -- their
 // DPS percentile is meaningless and just adds noise to a DPS-focused list.
 // Characters we couldn't determine a role for (no cached gameData) are kept.
-async function lookupOne(name: string, realm: string): Promise<LookupResult | null> {
+async function lookupOne(name: string, realm: string, clientId: string, clientSecret: string): Promise<LookupResult | null> {
   const key = `${name}-${realm}`;
   const slug = toServerSlug(realm);
 
   try {
-    const profile = await getCharacterProfile(name, slug, REGION, ZONE_ID, PARTITION);
+    const profile = await getCharacterProfile(name, slug, REGION, ZONE_ID, PARTITION, clientId, clientSecret);
 
     if (profile?.role === "tank" || profile?.role === "healer") {
       return null;
@@ -93,38 +112,24 @@ async function mapWithConcurrency<T, R>(items: T[], concurrency: number, fn: (it
   return results;
 }
 
-export async function POST(req: NextRequest) {
+export async function runLookup(rawNames: string[], clientId: string, clientSecret: string): Promise<LookupResult[]> {
   if (!ZONE_ID || !PARTITION) {
-    return NextResponse.json(
-      { error: "Server-Konfiguration unvollstaendig: WCL_ZONE_ID/WCL_PARTITION nicht gesetzt" },
-      { status: 500 }
-    );
+    throw new LookupError("CONFIG_INCOMPLETE");
   }
 
-  let rawNames: unknown;
-  try {
-    rawNames = (await req.json())?.names;
-  } catch {
-    return NextResponse.json({ error: "Ungueltiger Request-Body" }, { status: 400 });
-  }
-  if (!Array.isArray(rawNames)) {
-    return NextResponse.json({ error: "\"names\" muss ein Array von Strings sein" }, { status: 400 });
-  }
-
-  const entries = (rawNames as unknown[])
-    .filter((l): l is string => typeof l === "string")
+  const entries = rawNames
     .map((l) => l.trim())
     .filter((l) => l.length > 0)
     .map(parseNameRealm)
     .filter((e): e is { name: string; realm: string } => e !== null);
 
   if (entries.length === 0) {
-    return NextResponse.json({ error: "Keine gueltigen \"Name-Realm\" Eintraege gefunden" }, { status: 400 });
+    throw new LookupError("NO_VALID_ENTRIES");
   }
 
-  const results = (await mapWithConcurrency(entries, CONCURRENCY, ({ name, realm }) => lookupOne(name, realm))).filter(
-    (r): r is LookupResult => r !== null
-  );
+  const results = (
+    await mapWithConcurrency(entries, CONCURRENCY, ({ name, realm }) => lookupOne(name, realm, clientId, clientSecret))
+  ).filter((r): r is LookupResult => r !== null);
 
-  return NextResponse.json({ results });
+  return results;
 }

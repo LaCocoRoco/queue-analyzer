@@ -2,35 +2,45 @@
 //
 // WarcraftLogs API v2 client -- client-credentials flow only.
 //
-// This app is for personal/single-deployment use, sitting behind your own
-// access control (e.g. Authentik) -- so it holds one server-side
-// WCL_CLIENT_ID/WCL_CLIENT_SECRET pair and uses it for every request. No
-// per-user login: confirmed live (two different WCL accounts, same
-// registered client) that WCL's rate limit is tracked per API client, not
-// per logged-in user -- so a login screen would not have given separate
-// quotas anyway, just extra complexity.
+// Runs entirely in the browser (static export, no server -- see
+// next.config.mjs's output: "export" and the GitHub Pages workflow). This
+// works because WCL's OAuth token endpoint and GraphQL endpoint both send
+// permissive CORS headers (confirmed live: `Access-Control-Allow-Origin`
+// echoes the requesting origin on both), so a direct browser fetch is fine
+// -- no proxy needed. The user enters their own WCL API client's
+// credentials once (stored in IndexedDB, see lib/credentials.ts), and this
+// module takes them as parameters rather than reading any server env var
+// (there is no server). No per-user *login*: confirmed live (two different
+// WCL accounts, same registered client) that WCL's rate limit is tracked
+// per API client, not per logged-in user -- so an OAuth login screen
+// wouldn't give separate quotas anyway, just extra complexity. Entering
+// your own Client ID/Secret is a different thing: it's how you supply your
+// own quota budget without it being hardcoded at build time. Since this
+// runs in the user's own browser, their own Basic-Auth credentials being
+// visible in their own network tab is not an exposure to anyone else.
 
 const TOKEN_URL = "https://www.warcraftlogs.com/oauth/token";
 const API_ENDPOINT = "https://www.warcraftlogs.com/api/v2/client";
-
-const CLIENT_ID = process.env.WCL_CLIENT_ID ?? "";
-const CLIENT_SECRET = process.env.WCL_CLIENT_SECRET ?? "";
 
 interface CachedToken {
   accessToken: string;
   expiresAt: number; // epoch ms
 }
 
-// Module-level cache: one token shared by every request this server
-// process handles. Fine for a single-instance personal deployment.
-let cachedToken: CachedToken | null = null;
+// Keyed by clientId: this server process may see more than one WCL client
+// over its lifetime (credentials changed via the UI), so a single
+// module-level token no longer applies -- still fine to keep in memory,
+// this remains a single-instance personal deployment.
+const tokenCache = new Map<string, CachedToken>();
 
-async function getAccessToken(): Promise<string> {
-  if (cachedToken && Date.now() < cachedToken.expiresAt - 60_000) {
-    return cachedToken.accessToken;
+async function getAccessToken(clientId: string, clientSecret: string): Promise<string> {
+  const cached = tokenCache.get(clientId);
+  if (cached && Date.now() < cached.expiresAt - 60_000) {
+    return cached.accessToken;
   }
 
-  const basicAuth = "Basic " + Buffer.from(`${CLIENT_ID}:${CLIENT_SECRET}`).toString("base64");
+  // btoa, not Buffer -- this module runs in the browser, no Node runtime.
+  const basicAuth = "Basic " + btoa(`${clientId}:${clientSecret}`);
   const res = await fetch(TOKEN_URL, {
     method: "POST",
     headers: {
@@ -41,12 +51,27 @@ async function getAccessToken(): Promise<string> {
     cache: "no-store",
   });
   if (!res.ok) {
-    throw new Error(`WCL-Token-Request fehlgeschlagen (${res.status}): ${await res.text()}`);
+    // Left in English regardless of UI locale -- a raw diagnostic (HTTP
+    // status + WCL's own response body), not chrome text worth translating.
+    throw new Error(`WCL token request failed (${res.status}): ${await res.text()}`);
   }
 
   const data = (await res.json()) as { access_token: string; expires_in: number };
-  cachedToken = { accessToken: data.access_token, expiresAt: Date.now() + data.expires_in * 1000 };
-  return cachedToken.accessToken;
+  const token = { accessToken: data.access_token, expiresAt: Date.now() + data.expires_in * 1000 };
+  tokenCache.set(clientId, token);
+  return token.accessToken;
+}
+
+// Used by the onboarding screen to check a freshly-entered Client ID/Secret
+// pair before saving it -- just the OAuth token exchange, same endpoint
+// getAccessToken uses. Costs nothing against the WCL "points" budget (that
+// quota only applies to GraphQL queries, not the token endpoint). Throws on
+// an invalid pair; always bypasses the cache so a stale entry for the same
+// clientId (e.g. a previously-valid secret that got revoked) can't mask a
+// real failure.
+export async function validateCredentials(clientId: string, clientSecret: string): Promise<void> {
+  tokenCache.delete(clientId);
+  await getAccessToken(clientId, clientSecret);
 }
 
 interface GraphQLResponse<T> {
@@ -54,8 +79,13 @@ interface GraphQLResponse<T> {
   errors?: { message: string }[];
 }
 
-async function wclGraphQL<T>(query: string, variables: Record<string, unknown>): Promise<T> {
-  const accessToken = await getAccessToken();
+async function wclGraphQL<T>(
+  query: string,
+  variables: Record<string, unknown>,
+  clientId: string,
+  clientSecret: string
+): Promise<T> {
+  const accessToken = await getAccessToken(clientId, clientSecret);
 
   const res = await fetch(API_ENDPOINT, {
     method: "POST",
@@ -247,15 +277,16 @@ export async function getCharacterProfile(
   serverSlug: string,
   serverRegion: string,
   zoneID: number,
-  partition: number
+  partition: number,
+  clientId: string,
+  clientSecret: string
 ): Promise<CharacterProfile | null> {
-  const data = await wclGraphQL<RawCharacterProfileData>(CHARACTER_PROFILE_QUERY, {
-    name,
-    serverSlug,
-    serverRegion,
-    zoneID,
-    partition,
-  });
+  const data = await wclGraphQL<RawCharacterProfileData>(
+    CHARACTER_PROFILE_QUERY,
+    { name, serverSlug, serverRegion, zoneID, partition },
+    clientId,
+    clientSecret
+  );
   const char = data.characterData.character;
   if (!char) {
     return null;
