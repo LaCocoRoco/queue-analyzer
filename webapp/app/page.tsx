@@ -4,7 +4,7 @@ export default function Page() {
   return (
     <main
       style={{
-        maxWidth: 300,
+        width: "fit-content",
         margin: "40px auto",
         padding: "0 10px",
         fontFamily: "system-ui, sans-serif",

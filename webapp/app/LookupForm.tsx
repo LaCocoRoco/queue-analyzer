@@ -145,7 +145,6 @@ export default function LookupForm() {
           style={{
             marginTop: 10,
             borderCollapse: "collapse",
-            width: "100%",
             fontSize: 12,
           }}
         >
