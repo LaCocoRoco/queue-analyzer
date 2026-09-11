@@ -57,7 +57,7 @@ const cellStyle: CSSProperties = {
   border: "1px solid #333",
   padding: "0 4px",
   textAlign: "left",
-  lineHeight: 1.3,
+  lineHeight: 1.6,
 };
 
 // Best/Median/Runs share one fixed width, sized to comfortably fit the
@@ -67,7 +67,6 @@ const numericCellStyle: CSSProperties = {
   ...cellStyle,
   width: 56,
   whiteSpace: "nowrap",
-  textAlign: "right",
 };
 
 export default function LookupForm() {
@@ -108,7 +107,9 @@ export default function LookupForm() {
   async function handleClipboardLookup() {
     setError(null);
     if (!navigator.clipboard?.readText) {
-      setError("Zwischenablage-Zugriff nicht verfuegbar (braucht HTTPS oder localhost).");
+      setError(
+        "Zwischenablage-Zugriff nicht verfuegbar (braucht HTTPS oder localhost).",
+      );
       return;
     }
     try {
@@ -145,7 +146,7 @@ export default function LookupForm() {
           style={{
             marginTop: 10,
             borderCollapse: "collapse",
-            fontSize: 12,
+            fontSize: 16,
           }}
         >
           <thead>
