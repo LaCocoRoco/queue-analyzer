@@ -6,7 +6,12 @@
 --
 -- C_LFGList.GetApplicants() returns every applicant ID for your listing in
 -- one call (confirmed against Blizzard's own LFGListApplicationViewer
--- update code) -- no need to hover or scroll through the UI.
+-- update code) -- no need to hover or scroll through the UI. The raw order
+-- it comes back in does NOT match the on-screen applicant list order
+-- (confirmed live) -- Blizzard itself re-sorts it before display via
+-- LFGListUtil_SortApplicants (new applications to the bottom, otherwise by
+-- applicantInfo.displayOrderID), so we call that exact same function on our
+-- own copy before reading names, to match what you see in the window.
 
 BINDING_HEADER_QUEUEANALYZER = "Queue Analyzer"
 BINDING_NAME_QUEUEANALYZER_TOGGLE = "Bewerber-Namen anzeigen/exportieren"
@@ -17,6 +22,9 @@ local function GetApplicantNames()
 	local names = {}
 
 	local applicants = C_LFGList.GetApplicants()
+	if LFGListUtil_SortApplicants then
+		LFGListUtil_SortApplicants(applicants)
+	end
 	for _, applicantID in ipairs(applicants) do
 		local info = C_LFGList.GetApplicantInfo(applicantID)
 		if info then

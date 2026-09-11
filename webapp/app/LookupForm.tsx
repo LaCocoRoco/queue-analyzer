@@ -36,10 +36,15 @@ const CLASS_COLORS: Record<number, string> = {
   13: "#33937F", // Evoker
 };
 
+const THRESHOLD_COLOR = "#3fe13f";
+
+// As tight as possible: no vertical padding, just enough horizontal gap to
+// keep adjacent columns from visually merging.
 const cellStyle: CSSProperties = {
   border: "1px solid #333",
-  padding: "3px 3px",
+  padding: "0 4px",
   textAlign: "left",
+  lineHeight: 1.3,
 };
 
 // Best/Median/Runs share one fixed width, sized to comfortably fit the
@@ -56,6 +61,7 @@ export default function LookupForm() {
   const [results, setResults] = useState<LookupResult[] | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [threshold, setThreshold] = useState(0);
 
   async function runLookup(rawText: string) {
     const names = rawText
@@ -122,12 +128,28 @@ export default function LookupForm() {
         {loading ? "Frage ab..." : "Aus Zwischenablage abfragen"}
       </button>
 
+      <div style={{ marginTop: 14, display: "flex", alignItems: "center", gap: 10 }}>
+        <label htmlFor="threshold" style={{ fontSize: 13, color: "#aaa", whiteSpace: "nowrap" }}>
+          Gruen ab
+        </label>
+        <input
+          id="threshold"
+          type="range"
+          min={0}
+          max={100}
+          value={threshold}
+          onChange={(e) => setThreshold(Number(e.target.value))}
+          style={{ flex: 1 }}
+        />
+        <span style={{ fontSize: 13, color: THRESHOLD_COLOR, width: 32, textAlign: "right" }}>{threshold}%</span>
+      </div>
+
       {error && <p style={{ color: "#ff6b6b", marginTop: 12 }}>{error}</p>}
 
       {results && (
         <table
           style={{
-            marginTop: 20,
+            marginTop: 10,
             borderCollapse: "collapse",
             width: "100%",
             fontSize: 12,
@@ -153,7 +175,13 @@ export default function LookupForm() {
                 >
                   {r.name}
                 </td>
-                <td style={numericCellStyle}>
+                <td
+                  style={{
+                    ...numericCellStyle,
+                    color: r.found && r.best! >= threshold ? THRESHOLD_COLOR : undefined,
+                    fontWeight: r.found && r.best! >= threshold ? 700 : undefined,
+                  }}
+                >
                   {r.found
                     ? r.best!.toFixed(1)
                     : r.error
