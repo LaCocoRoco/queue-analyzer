@@ -236,7 +236,7 @@ export default function LookupForm() {
 
       {errorMessage && buttonState === "error" && <p style={{ color: "#ff6b6b", marginTop: 12 }}>{errorMessage}</p>}
 
-      <p style={{ marginTop: 20 }}>
+      <p style={{ marginTop: 20, textAlign: "center" }}>
         <button
           type="button"
           onClick={handleResetCredentials}
