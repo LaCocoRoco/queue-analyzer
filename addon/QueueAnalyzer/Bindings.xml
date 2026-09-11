@@ -1,5 +1,5 @@
 <Bindings>
 	<Binding name="QUEUEANALYZER_TOGGLE" header="BINDING_HEADER_QUEUEANALYZER" description="Show/export applicant names">
-		QueueAnalyzer_ToggleExportFrame()
+		QueueAnalyzer_ToggleFrame()
 	</Binding>
 </Bindings>

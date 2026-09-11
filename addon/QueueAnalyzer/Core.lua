@@ -45,17 +45,20 @@ local function GetApplicantNames()
 end
 
 -- Data imported from the webapp (pasted into the import window below), keyed
--- by the same "Name-Realm" string GetApplicantNames() produces, valued by
--- the WCL "Best" percentile. Session-only (no SavedVariables) -- re-paste
--- after each /reload, matching the export side which is also always
--- re-read live.
+-- by the same "Name-Realm" string GetApplicantNames() produces, valued by a
+-- {best, rank} table -- rank is 0 when the webapp's Filter wasn't active for
+-- that export (nothing to show). Session-only (no SavedVariables) --
+-- re-paste after each /reload, matching the export side which is also
+-- always re-read live.
 QueueAnalyzerImportedData = {}
 
----Parse the webapp's flat ":"-delimited "Name-Realm:Best:Name-Realm:Best:..."
----string (see LookupForm.tsx's toImportString) into a lookup table. Safe to
----split the whole string on ":" since names/realms never contain one.
+---Parse the webapp's flat ":"-delimited "Name-Realm:Best:Rank:Name-Realm:Best:Rank:..."
+---string (see LookupForm.tsx's toExportString) into a lookup table. Safe to
+---split the whole string on ":" since names/realms never contain one. Always
+---triplets -- rank is 0, not omitted, when the webapp had no rank for an
+---entry, so the stride here never has to guess.
 ---@param text string
----@return table<string, number>
+---@return table<string, {best: number, rank: number}>
 local function ParseImportText(text)
 	local data = {}
 	local clean = text:gsub("%s", "") -- strip any incidental whitespace/newlines from pasting
@@ -63,11 +66,12 @@ local function ParseImportText(text)
 	for token in clean:gmatch("[^:]+") do
 		table.insert(tokens, token)
 	end
-	for i = 1, #tokens - 1, 2 do
+	for i = 1, #tokens - 2, 3 do
 		local key = tokens[i]
-		local value = tonumber(tokens[i + 1])
-		if key and value then
-			data[key] = value
+		local best = tonumber(tokens[i + 1])
+		local rank = tonumber(tokens[i + 2])
+		if key and best and rank then
+			data[key] = { best = best, rank = rank }
 		end
 	end
 	return data
@@ -89,26 +93,22 @@ local function PercentileColorCode(pct)
 	end
 end
 
-local function GetImportedBest(name, realm)
+---@return {best: number, rank: number}|nil
+local function GetImportedData(name, realm)
 	return QueueAnalyzerImportedData[name .. "-" .. realm]
 end
 
 local REPO_URL = "https://github.com/LaCocoRoco/queue-analyzer"
 
--- WoW's UI widgets have no concept of a clickable external link (chat
--- hyperlinks only open in-game item/spell/quest panels, never a browser),
--- so this is just a small label plus a single-line EditBox pre-filled with
--- the URL -- click it to select-all, then Ctrl+C, same copy pattern as the
--- rest of the addon. Purely informational: never fetched or used by the
--- addon itself (no network access in the WoW sandbox anyway).
+-- WoW has no concept of a clickable external link (chat hyperlinks only
+-- open in-game item/spell/quest panels, never a browser), so this is just
+-- a single-line EditBox pre-filled with the URL -- click it to select-all,
+-- then Ctrl+C, same copy pattern as the export/import boxes below.
+-- Informational only: never fetched or used by the addon itself.
 local function AddRepoFooter(f)
-	local label = f:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-	label:SetPoint("BOTTOM", 0, 24)
-	label:SetText("Queue Analyzer:")
-
 	local box = CreateFrame("EditBox", nil, f)
-	box:SetSize(360, 14)
-	box:SetPoint("TOP", label, "BOTTOM", 0, -2)
+	box:SetSize(280, 14)
+	box:SetPoint("BOTTOM", 0, 14)
 	box:SetFontObject(GameFontDisableSmall)
 	box:SetJustifyH("CENTER")
 	box:SetAutoFocus(false)
@@ -122,9 +122,15 @@ end
 
 local frame
 
-local function CreateExportFrame()
-	local f = CreateFrame("Frame", "QueueAnalyzerExportFrame", UIParent, "BasicFrameTemplateWithInset")
-	f:SetSize(420, 514)
+-- One small window instead of two: an Export field (pre-filled, refreshed
+-- live from the current applicants) and an Import field (paste the
+-- webapp's result back in), both single-line -- the data itself is always
+-- one flat ":"-delimited line anyway (see GetApplicantNames/ParseImportText),
+-- so a big multi-line scrollable box was never actually needed and only
+-- made it fiddly to know where to click to select everything.
+local function CreateQueueAnalyzerFrame()
+	local f = CreateFrame("Frame", "QueueAnalyzerFrame", UIParent, "BasicFrameTemplateWithInset")
+	f:SetSize(380, 160)
 	f:SetPoint("CENTER")
 	f:SetMovable(true)
 	f:EnableMouse(true)
@@ -132,42 +138,68 @@ local function CreateExportFrame()
 	f:SetScript("OnDragStart", f.StartMoving)
 	f:SetScript("OnDragStop", f.StopMovingOrSizing)
 	f:SetClampedToScreen(true)
-	tinsert(UISpecialFrames, "QueueAnalyzerExportFrame") -- Escape closes it
+	tinsert(UISpecialFrames, "QueueAnalyzerFrame") -- Escape closes it
 
 	f.title = f:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
 	f.title:SetPoint("LEFT", f.TitleBg, "LEFT", 5, 0)
-	f.title:SetText("Queue Analyzer - Applicants")
+	f.title:SetText("Queue Analyzer")
 
-	f.hint = f:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-	f.hint:SetPoint("TOPLEFT", 14, -30)
-	f.hint:SetPoint("RIGHT", -14, 0)
-	f.hint:SetJustifyH("LEFT")
-	f.hint:SetText("Ctrl+A, Ctrl+C to copy. Only shows data if you're the group leader with applicants.")
+	local exportLabel = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+	exportLabel:SetPoint("TOPLEFT", 16, -34)
+	exportLabel:SetWidth(50)
+	exportLabel:SetJustifyH("LEFT")
+	exportLabel:SetText("Export")
 
-	local scrollFrame = CreateFrame("ScrollFrame", nil, f, "UIPanelScrollFrameTemplate")
-	scrollFrame:SetPoint("TOPLEFT", 14, -50)
-	scrollFrame:SetPoint("BOTTOMRIGHT", -30, 78)
-
-	local editBox = CreateFrame("EditBox", "QueueAnalyzerExportEditBox", scrollFrame)
-	editBox:SetMultiLine(true)
-	editBox:SetFontObject(ChatFontNormal)
-	editBox:SetWidth(360)
-	editBox:SetAutoFocus(false)
-	editBox:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
-	scrollFrame:SetScrollChild(editBox)
-	f.editBox = editBox
+	local exportBox = CreateFrame("EditBox", "QueueAnalyzerExportEditBox", f, "InputBoxTemplate")
+	exportBox:SetSize(210, 19)
+	exportBox:SetPoint("LEFT", exportLabel, "RIGHT", 4, 0)
+	exportBox:SetAutoFocus(false)
+	exportBox:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
+	-- Clicking back in re-selects everything -- you should never need to
+	-- manually drag-select in a field that only ever holds one full value.
+	exportBox:SetScript("OnEditFocusGained", function(self) self:HighlightText() end)
+	f.exportBox = exportBox
 
 	local refreshButton = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
 	refreshButton:SetText("Refresh")
-	refreshButton:SetSize(120, 24)
-	refreshButton:SetPoint("BOTTOM", -65, 44)
+	refreshButton:SetSize(74, 22)
+	refreshButton:SetPoint("LEFT", exportBox, "RIGHT", 8, 0)
 	refreshButton:SetScript("OnClick", function() QueueAnalyzer_RefreshExport() end)
 
+	local importLabel = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+	importLabel:SetPoint("TOPLEFT", exportLabel, "BOTTOMLEFT", 0, -32)
+	importLabel:SetWidth(50)
+	importLabel:SetJustifyH("LEFT")
+	importLabel:SetText("Import")
+
+	local importBox = CreateFrame("EditBox", "QueueAnalyzerImportEditBox", f, "InputBoxTemplate")
+	importBox:SetSize(210, 19)
+	importBox:SetPoint("LEFT", importLabel, "RIGHT", 4, 0)
+	importBox:SetAutoFocus(false)
+	importBox:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
+	-- Auto-select on focus here too -- otherwise a paste without first
+	-- clearing old content would insert at the cursor instead of replacing
+	-- it, silently corrupting the data.
+	importBox:SetScript("OnEditFocusGained", function(self) self:HighlightText() end)
+	f.importBox = importBox
+
 	local importButton = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-	importButton:SetText("Open Import")
-	importButton:SetSize(120, 24)
-	importButton:SetPoint("BOTTOM", 65, 44)
-	importButton:SetScript("OnClick", function() QueueAnalyzer_ToggleImportFrame() end)
+	importButton:SetText("Import")
+	importButton:SetSize(74, 22)
+	importButton:SetPoint("LEFT", importBox, "RIGHT", 8, 0)
+	importButton:SetScript("OnClick", function()
+		local data = ParseImportText(f.importBox:GetText())
+		local count = 0
+		for _ in pairs(data) do
+			count = count + 1
+		end
+		QueueAnalyzerImportedData = data
+		f.status:SetText(count .. " entries imported.")
+	end)
+
+	f.status = f:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+	f.status:SetPoint("TOPLEFT", importLabel, "BOTTOMLEFT", 4, -8)
+	f.status:SetText("")
 
 	AddRepoFooter(f)
 
@@ -180,28 +212,25 @@ function QueueAnalyzer_RefreshExport()
 	end
 
 	local names = GetApplicantNames()
-	local text
-	if #names == 0 then
-		text = "(No applicants found. You must be the group leader of a listing with applicants.)"
-	else
-		-- One flat ":"-delimited string instead of one name per line -- easier
-		-- to select/copy reliably as a single line, and the webapp reads it
-		-- back the same way (splits on ":"; names/realms never contain ":").
-		text = table.concat(names, ":")
-	end
+	-- One flat ":"-delimited string instead of one name per line -- easier
+	-- to select/copy reliably as a single line, and the webapp reads it
+	-- back the same way (splits on ":"; names/realms never contain ":").
+	-- Empty when there are no applicants -- no placeholder text, just an
+	-- empty field.
+	local text = table.concat(names, ":")
 
-	frame.editBox:SetText(text)
+	frame.exportBox:SetText(text)
 	-- Order matters: SetFocus() must come before HighlightText() -- the
 	-- reverse order (as this used to be) leaves the text visually selected
 	-- but not reliably in the EditBox's actual input focus, so Ctrl+C does
 	-- nothing until the user manually clicks in and re-selects.
-	frame.editBox:SetFocus()
-	frame.editBox:HighlightText()
+	frame.exportBox:SetFocus()
+	frame.exportBox:HighlightText()
 end
 
-function QueueAnalyzer_ToggleExportFrame()
+function QueueAnalyzer_ToggleFrame()
 	if not frame then
-		frame = CreateExportFrame()
+		frame = CreateQueueAnalyzerFrame()
 	end
 
 	if frame:IsShown() then
@@ -213,97 +242,9 @@ function QueueAnalyzer_ToggleExportFrame()
 	QueueAnalyzer_RefreshExport()
 end
 
-local importFrame
-
-local function CreateImportFrame()
-	local f = CreateFrame("Frame", "QueueAnalyzerImportFrame", UIParent, "BasicFrameTemplateWithInset")
-	f:SetSize(420, 514)
-	-- Anchored to the right of the export window by default so both can sit
-	-- side by side: export on the left (where you copy the applicant list
-	-- from), import on the right (where you paste the webapp's result back
-	-- in) -- matches the requested "neben dem Fenster, aus dem wir
-	-- exportiert haben" placement. Still freely draggable afterwards.
-	if frame then
-		f:SetPoint("TOPLEFT", frame, "TOPRIGHT", 10, 0)
-	else
-		f:SetPoint("CENTER", 220, 0)
-	end
-	f:SetMovable(true)
-	f:EnableMouse(true)
-	f:RegisterForDrag("LeftButton")
-	f:SetScript("OnDragStart", f.StartMoving)
-	f:SetScript("OnDragStop", f.StopMovingOrSizing)
-	f:SetClampedToScreen(true)
-	tinsert(UISpecialFrames, "QueueAnalyzerImportFrame") -- Escape closes it
-
-	f.title = f:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-	f.title:SetPoint("LEFT", f.TitleBg, "LEFT", 5, 0)
-	f.title:SetText("Queue Analyzer - Import")
-
-	f.hint = f:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-	f.hint:SetPoint("TOPLEFT", 14, -30)
-	f.hint:SetPoint("RIGHT", -14, 0)
-	f.hint:SetJustifyH("LEFT")
-	f.hint:SetText("Paste the text from the webapp here (Ctrl+V) and click Import. The Best value then shows up colored in the applicant tooltip.")
-
-	local scrollFrame = CreateFrame("ScrollFrame", nil, f, "UIPanelScrollFrameTemplate")
-	scrollFrame:SetPoint("TOPLEFT", 14, -50)
-	scrollFrame:SetPoint("BOTTOMRIGHT", -30, 78)
-
-	local editBox = CreateFrame("EditBox", "QueueAnalyzerImportEditBox", scrollFrame)
-	editBox:SetMultiLine(true)
-	editBox:SetFontObject(ChatFontNormal)
-	editBox:SetWidth(360)
-	editBox:SetAutoFocus(false)
-	editBox:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
-	scrollFrame:SetScrollChild(editBox)
-	f.editBox = editBox
-
-	f.status = f:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-	f.status:SetPoint("BOTTOM", 0, 68)
-	f.status:SetText("")
-
-	local importButton = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-	importButton:SetText("Import")
-	importButton:SetSize(120, 24)
-	importButton:SetPoint("BOTTOM", 0, 44)
-	importButton:SetScript("OnClick", function()
-		local data = ParseImportText(f.editBox:GetText())
-		local count = 0
-		for _ in pairs(data) do
-			count = count + 1
-		end
-		QueueAnalyzerImportedData = data
-		f.status:SetText(count .. " entries imported.")
-	end)
-
-	AddRepoFooter(f)
-
-	return f
-end
-
-function QueueAnalyzer_ToggleImportFrame()
-	if not importFrame then
-		importFrame = CreateImportFrame()
-	end
-
-	if importFrame:IsShown() then
-		importFrame:Hide()
-		return
-	end
-
-	importFrame:Show()
-	-- Auto-focus (unlike the export box) since the whole point of this box
-	-- is to immediately Ctrl+V into it.
-	importFrame.editBox:SetFocus()
-end
-
 SLASH_QUEUEANALYZER1 = "/qa"
 SLASH_QUEUEANALYZER2 = "/queueanalyzer"
-SlashCmdList["QUEUEANALYZER"] = QueueAnalyzer_ToggleExportFrame
-
-SLASH_QUEUEANALYZERIMPORT1 = "/qai"
-SlashCmdList["QUEUEANALYZERIMPORT"] = QueueAnalyzer_ToggleImportFrame
+SlashCmdList["QUEUEANALYZER"] = QueueAnalyzer_ToggleFrame
 
 -- Right-click entry on individual applicants: right-clicking a member row
 -- already opens a Blizzard context menu (Whisper/Report), built with the
@@ -315,7 +256,7 @@ SlashCmdList["QUEUEANALYZERIMPORT"] = QueueAnalyzer_ToggleImportFrame
 if Menu and Menu.ModifyMenu then
 	Menu.ModifyMenu("MENU_LFG_FRAME_MEMBER_APPLY", function(owner, rootDescription)
 		rootDescription:CreateDivider()
-		rootDescription:CreateButton("Copy all applicants (Queue Analyzer)", QueueAnalyzer_ToggleExportFrame)
+		rootDescription:CreateButton("Copy all applicants (Queue Analyzer)", QueueAnalyzer_ToggleFrame)
 	end)
 end
 
@@ -368,12 +309,62 @@ local function HookApplicantTooltip()
 			realm = GetNormalizedRealmName()
 		end
 
-		local best = GetImportedBest(name, realm)
-		if best and GameTooltip:IsOwned(self) then
+		local data = GetImportedData(name, realm)
+		if data and GameTooltip:IsOwned(self) then
 			GameTooltip:AddLine(" ")
-			GameTooltip:AddLine("Queue Analyzer Best: " .. PercentileColorCode(best) .. string.format("%.1f", best) .. "|r")
+			-- Whole numbers only -- the webapp now exports Best rounded, no
+			-- decimals, so "%d" (not "%.1f") avoids a stray ".0" suffix.
+			GameTooltip:AddLine("Queue Analyzer Best: " .. PercentileColorCode(data.best) .. string.format("%d", data.best) .. "|r")
 			GameTooltip:Show()
 		end
+	end)
+end
+
+-- Prepends "RANK:BEST:" (or just "BEST:" when no rank was exported) to the
+-- name shown for each applicant member in the Application Viewer list
+-- itself -- unlike the tooltip above, this is visible without hovering.
+-- LFGListApplicationViewer_UpdateApplicantMember is what Blizzard's own code
+-- calls to (re)paint a member row's Name text every time the list refreshes
+-- (scrolling, new applicants, etc.), so this re-fires often -- it rebuilds
+-- the display name itself (Ambiguate + the "  " indent Blizzard uses for
+-- group members past the first) from scratch every time rather than reading
+-- back member.Name's current text, which would already contain our own
+-- prefix from the previous call and double up indefinitely otherwise.
+local hookedApplicantNamePrefix = false
+local function HookApplicantNamePrefix()
+	if hookedApplicantNamePrefix or not LFGListApplicationViewer_UpdateApplicantMember then
+		return
+	end
+	hookedApplicantNamePrefix = true
+
+	hooksecurefunc("LFGListApplicationViewer_UpdateApplicantMember", function(member, appID, memberIdx)
+		local fullName = C_LFGList.GetApplicantMemberInfo(appID, memberIdx)
+		if not fullName then
+			return
+		end
+		local name, realm = strsplit("-", fullName)
+		if not realm or realm == "" then
+			realm = GetNormalizedRealmName()
+		end
+
+		local data = GetImportedData(name, realm)
+		if not data then
+			return
+		end
+
+		local displayName = Ambiguate(fullName, "short")
+		if memberIdx > 1 then
+			displayName = "  " .. displayName
+		end
+
+		local prefix
+		if data.rank > 0 then
+			prefix = string.format("%02d:%d:", data.rank, data.best)
+		else
+			prefix = string.format("%d:", data.best)
+		end
+
+		member.Name:SetText(PercentileColorCode(data.best) .. prefix .. "|r" .. displayName)
 	end)
 end
 
@@ -387,16 +378,104 @@ local function AddApplicationViewerButton()
 	end
 
 	local button = CreateFrame("Button", nil, panel, "UIPanelButtonTemplate")
-	button:SetSize(150, 20)
-	button:SetText("Copy Applicants")
-	button:SetPoint("TOPRIGHT", panel, "TOPRIGHT", -6, -4)
-	button:SetScript("OnClick", QueueAnalyzer_ToggleExportFrame)
+	button:SetSize(90, 20)
+	button:SetText("Analyzer")
+	-- Far enough left of TOPRIGHT to clear the panel's own close button --
+	-- at -6 the two hitboxes overlapped, so the close button (drawn on top)
+	-- silently ate the first click instead of it reaching this one.
+	button:SetPoint("TOPRIGHT", panel, "TOPRIGHT", -34, -4)
+	button:SetScript("OnClick", QueueAnalyzer_ToggleFrame)
 	panel.QueueAnalyzerButton = button
+end
+
+-- Compact LOG/Rank readout squeezed into the Role column's own leftover
+-- space, right after whichever role icon is actually the rightmost visible
+-- one (applicants show 1-3 icons depending on which roles they're flexible
+-- for) -- anchored to that icon instead of a fixed x-offset so it adapts
+-- automatically instead of assuming a fixed icon count. Deliberately no
+-- header label and the smallest available font: LFGListFrame can't be
+-- resized (both corners are anchored, so SetWidth is a no-op -- confirmed
+-- live), so unlike the name prefix, this has zero room to spare.
+local function GetLastRoleIcon(member)
+	if member.RoleIcon3:IsShown() then
+		return member.RoleIcon3
+	end
+	if member.RoleIcon2:IsShown() then
+		return member.RoleIcon2
+	end
+	return member.RoleIcon1
+end
+
+-- Full combo, all four placements at once, to compare side by side live --
+-- expected to prune down to whichever ones actually hold up once you've
+-- seen them in game:
+--   1. Name prefix (HookApplicantNamePrefix) -- unchanged.
+--   2. After the last role icon: rank + log combined (unchanged from before).
+--   3. After iLvl: rank alone, anchored to member.ItemLevel same way (2) is
+--      anchored to the role icon.
+--   4. After Rating: log alone, anchored to member.Rating the same way --
+--      this is the one most likely to collide with the Accept/Decline
+--      buttons (confirmed no free space there in the earlier column
+--      experiment), but the ask was to try it, so here it is.
+local hookedApplicantReadouts = false
+local function HookApplicantReadouts()
+	if hookedApplicantReadouts or not LFGListApplicationViewer_UpdateApplicantMember then
+		return
+	end
+	hookedApplicantReadouts = true
+
+	hooksecurefunc("LFGListApplicationViewer_UpdateApplicantMember", function(member, appID, memberIdx)
+		local fullName = C_LFGList.GetApplicantMemberInfo(appID, memberIdx)
+		if not fullName then
+			return
+		end
+		local name, realm = strsplit("-", fullName)
+		if not realm or realm == "" then
+			realm = GetNormalizedRealmName()
+		end
+
+		local data = GetImportedData(name, realm)
+
+		if not member.QueueAnalyzerRoleReadout then
+			member.QueueAnalyzerRoleReadout = member:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+		end
+		if not member.QueueAnalyzerIlvlReadout then
+			member.QueueAnalyzerIlvlReadout = member:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+		end
+		if not member.QueueAnalyzerRatingReadout then
+			member.QueueAnalyzerRatingReadout = member:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+		end
+
+		if not data then
+			member.QueueAnalyzerRoleReadout:SetText("")
+			member.QueueAnalyzerIlvlReadout:SetText("")
+			member.QueueAnalyzerRatingReadout:SetText("")
+			return
+		end
+
+		-- Re-anchored every update (not just on creation) since which role
+		-- icon is the rightmost visible one can change between applicants.
+		member.QueueAnalyzerRoleReadout:ClearAllPoints()
+		member.QueueAnalyzerRoleReadout:SetPoint("LEFT", GetLastRoleIcon(member), "RIGHT", 2, 0)
+		local roleText = data.rank > 0 and string.format("%02d %d", data.rank, data.best) or tostring(data.best)
+		member.QueueAnalyzerRoleReadout:SetText(PercentileColorCode(data.best) .. roleText .. "|r")
+
+		member.QueueAnalyzerIlvlReadout:ClearAllPoints()
+		member.QueueAnalyzerIlvlReadout:SetPoint("LEFT", member.ItemLevel, "RIGHT", 2, 0)
+		local rankText = data.rank > 0 and string.format("%02d", data.rank) or ""
+		member.QueueAnalyzerIlvlReadout:SetText(PercentileColorCode(data.best) .. rankText .. "|r")
+
+		member.QueueAnalyzerRatingReadout:ClearAllPoints()
+		member.QueueAnalyzerRatingReadout:SetPoint("LEFT", member.Rating, "RIGHT", 2, 0)
+		member.QueueAnalyzerRatingReadout:SetText(PercentileColorCode(data.best) .. data.best .. "|r")
+	end)
 end
 
 local function OnGroupFinderLoaded()
 	AddApplicationViewerButton()
 	HookApplicantTooltip()
+	HookApplicantNamePrefix()
+	HookApplicantReadouts()
 end
 
 local loader = CreateFrame("Frame")
