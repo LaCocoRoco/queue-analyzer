@@ -6,6 +6,7 @@
 // in logic when the app became a static export with no server at all.
 
 import { getCharacterProfile, hasData, runsEstimate, toServerSlug } from "./wcl";
+import { getRioProfile } from "./rio";
 
 const REGION = process.env.NEXT_PUBLIC_WCL_REGION ?? "EU";
 const ZONE_ID = Number(process.env.NEXT_PUBLIC_WCL_ZONE_ID);
@@ -44,6 +45,11 @@ export interface LookupResult {
   best: number;
   median: number;
   runs: number;
+  // raider.io data, fetched in parallel with the WCL lookup -- 0 when
+  // raider.io has no profile for this character (never blocks the result,
+  // same as a missing WCL log).
+  ioScore: number;
+  itemLevel: number;
   error?: string;
 }
 
@@ -63,32 +69,47 @@ async function lookupOne(name: string, realm: string, clientId: string, clientSe
   const key = `${name}-${realm}`;
   const slug = toServerSlug(realm);
 
-  try {
-    const profile = await getCharacterProfile(name, slug, REGION, ZONE_ID, PARTITION, clientId, clientSecret);
+  // WCL and raider.io are two independent, unrelated APIs -- run them
+  // concurrently instead of one after the other, halving the latency per
+  // character. A raider.io failure never affects the WCL result or vice
+  // versa (getRioProfile never throws, resolves to null instead).
+  const [profileResult, rioProfile] = await Promise.all([
+    getCharacterProfile(name, slug, REGION, ZONE_ID, PARTITION, clientId, clientSecret)
+      .then((profile) => ({ profile, error: undefined as string | undefined }))
+      .catch((err) => ({ profile: null, error: (err as Error).message })),
+    getRioProfile(name, slug, REGION),
+  ]);
 
-    if (profile?.role === "tank" || profile?.role === "healer") {
-      return null;
-    }
+  const ioScore = rioProfile?.score ?? 0;
+  const itemLevel = rioProfile?.itemLevel ?? 0;
 
-    const zr = profile?.zoneRankings ?? null;
-    if (hasData(zr)) {
-      return {
-        key,
-        name,
-        realm,
-        classId: profile!.classId,
-        found: true,
-        best: zr.bestPerformanceAverage,
-        median: zr.medianPerformanceAverage ?? 0,
-        runs: runsEstimate(zr),
-      };
-    }
-    // Known to WCL (or not) but no logs for this zone/partition -- show as
-    // a flat 0 rather than a placeholder string.
-    return { key, name, realm, classId: profile?.classId ?? null, found: false, best: 0, median: 0, runs: 0 };
-  } catch (err) {
-    return { key, name, realm, classId: null, found: false, best: 0, median: 0, runs: 0, error: (err as Error).message };
+  if (profileResult.error) {
+    return { key, name, realm, classId: null, found: false, best: 0, median: 0, runs: 0, ioScore, itemLevel, error: profileResult.error };
   }
+
+  const profile = profileResult.profile;
+  if (profile?.role === "tank" || profile?.role === "healer") {
+    return null;
+  }
+
+  const zr = profile?.zoneRankings ?? null;
+  if (hasData(zr)) {
+    return {
+      key,
+      name,
+      realm,
+      classId: profile!.classId,
+      found: true,
+      best: zr.bestPerformanceAverage,
+      median: zr.medianPerformanceAverage ?? 0,
+      runs: runsEstimate(zr),
+      ioScore,
+      itemLevel,
+    };
+  }
+  // Known to WCL (or not) but no logs for this zone/partition -- show as
+  // a flat 0 rather than a placeholder string.
+  return { key, name, realm, classId: profile?.classId ?? null, found: false, best: 0, median: 0, runs: 0, ioScore, itemLevel };
 }
 
 // Runs `fn` over `items` with at most `concurrency` in flight at once --
@@ -110,6 +131,37 @@ async function mapWithConcurrency<T, R>(items: T[], concurrency: number, fn: (it
 
   await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, worker));
   return results;
+}
+
+export interface ScoredResult extends LookupResult {
+  score: number;
+}
+
+// Combines WCL's Best percentile (already 0-100) with raider.io's Mythic+
+// score into one weighted value, for the optional "Filter" ranking mode.
+// The raw IO score (e.g. 1800-3000) isn't on the same 0-100 scale as a WCL
+// percentile, so it's min-max normalized across the current batch first
+// (lowest applicant -> 0, highest -> 100) before weighting.
+// logsWeight/ioWeight are two independent 0-100 sliders, not required to
+// sum to 100 -- dividing by their sum means e.g. both at 50 is a plain
+// average of the two normalized scores, matching what "50/50" should mean.
+// A character raider.io has no profile for gets ioNorm 0 (worst case)
+// rather than being skipped or given a free-pass average -- an unknown
+// score shouldn't rank the same as a verified middling one.
+export function rankResults(results: LookupResult[], logsWeight: number, ioWeight: number): ScoredResult[] {
+  const withIo = results.filter((r) => r.ioScore > 0);
+  const ioMin = withIo.length ? Math.min(...withIo.map((r) => r.ioScore)) : 0;
+  const ioMax = withIo.length ? Math.max(...withIo.map((r) => r.ioScore)) : 0;
+  const totalWeight = logsWeight + ioWeight;
+
+  const scored: ScoredResult[] = results.map((r) => {
+    const logsNorm = r.best;
+    const ioNorm = r.ioScore <= 0 ? 0 : ioMax > ioMin ? ((r.ioScore - ioMin) / (ioMax - ioMin)) * 100 : 50;
+    const score = totalWeight > 0 ? (logsWeight * logsNorm + ioWeight * ioNorm) / totalWeight : 0;
+    return { ...r, score };
+  });
+
+  return scored.sort((a, b) => b.score - a.score);
 }
 
 export async function runLookup(rawNames: string[], clientId: string, clientSecret: string): Promise<LookupResult[]> {

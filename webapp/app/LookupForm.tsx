@@ -3,7 +3,7 @@
 import { useEffect, useState, type CSSProperties } from "react";
 import { clearCredentials, loadCredentials, saveCredentials, type WclCredentials } from "@/lib/credentials";
 import { detectLocale, DICTS, DEFAULT_LOCALE } from "@/lib/i18n";
-import { LookupError, runLookup, type LookupResult } from "@/lib/lookup";
+import { LookupError, rankResults, runLookup, type LookupResult } from "@/lib/lookup";
 import { validateCredentials } from "@/lib/wcl";
 
 // Flat ":"-delimited "Name-Realm:Best:Name-Realm:Best:..." -- the format
@@ -16,6 +16,29 @@ function toExportString(results: LookupResult[]): string {
     .flatMap((r) => [r.key, r.best.toFixed(1)])
     .join(":");
 }
+
+// Same percentile color tiers used elsewhere for WCL Best/Median -- reused
+// here for the "Score" column so a quick glance at color already tells you
+// roughly where someone lands, before reading the number.
+function percentileColor(pct: number): string {
+  if (pct >= 95) return "#FF8000";
+  if (pct >= 75) return "#A335EE";
+  if (pct >= 50) return "#0070DD";
+  if (pct >= 25) return "#1EFF00";
+  return "#9D9D9D";
+}
+
+const previewCellStyle: CSSProperties = {
+  border: "1px solid #333",
+  padding: "2px 6px",
+  textAlign: "left",
+};
+
+const previewNumCellStyle: CSSProperties = {
+  ...previewCellStyle,
+  textAlign: "right",
+  whiteSpace: "nowrap",
+};
 
 type ButtonState = "idle" | "loading" | "done" | "error";
 
@@ -53,6 +76,15 @@ export default function LookupForm() {
 
   const [buttonState, setButtonState] = useState<ButtonState>("idle");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
+  // Raw (unsorted) results from the last successful lookup -- kept around
+  // purely so the Filter/Preview table below can re-rank live as the
+  // weight sliders move, without re-querying WCL/raider.io on every drag.
+  const [results, setResults] = useState<LookupResult[] | null>(null);
+  const [filterEnabled, setFilterEnabled] = useState(false);
+  const [previewEnabled, setPreviewEnabled] = useState(false);
+  const [logsWeight, setLogsWeight] = useState(50);
+  const [ioWeight, setIoWeight] = useState(50);
 
   useEffect(() => {
     setLocale(detectLocale());
@@ -113,8 +145,20 @@ export default function LookupForm() {
         throw new Error(t.errorNoNames);
       }
 
-      const results = await runLookup(names, creds.clientId, creds.clientSecret);
-      await navigator.clipboard.writeText(toExportString(results));
+      const rawResults = await runLookup(names, creds.clientId, creds.clientSecret);
+      setResults(rawResults);
+
+      // Filter active -> export in ranked order (current slider weights)
+      // instead of the original applicant-list order. This is the only
+      // way the ranking reaches the addon at all: WoW's own Group Finder
+      // applicant list has no API to reorder (confirmed against Blizzard's
+      // own LFGList.lua -- displayOrderID is read-only), so the addon
+      // can't re-sort its native window either way. Order in the exported
+      // string is purely informational for now (the addon's import side
+      // keys data by name, not position) -- a future addon-side ranked
+      // display would be the way to actually surface this in-game.
+      const exportResults = filterEnabled ? rankResults(rawResults, logsWeight, ioWeight) : rawResults;
+      await navigator.clipboard.writeText(toExportString(exportResults));
 
       setButtonState("done");
       setTimeout(() => setButtonState("idle"), 1800);
@@ -235,6 +279,79 @@ export default function LookupForm() {
       </button>
 
       {errorMessage && buttonState === "error" && <p style={{ color: "#ff6b6b", marginTop: 12 }}>{errorMessage}</p>}
+
+      <label
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 6,
+          marginTop: 20,
+          fontSize: 13,
+          color: "#aaa",
+          cursor: "pointer",
+        }}
+      >
+        <input type="checkbox" checked={filterEnabled} onChange={(e) => setFilterEnabled(e.target.checked)} />
+        Filter
+      </label>
+
+      {filterEnabled && (
+        <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 12, maxWidth: 320 }}>
+          <label style={{ fontSize: 13, color: "#aaa" }}>
+            Logs: {logsWeight}
+            <input
+              type="range"
+              min={0}
+              max={100}
+              value={logsWeight}
+              onChange={(e) => setLogsWeight(Number(e.target.value))}
+              style={{ width: "100%" }}
+            />
+          </label>
+          <label style={{ fontSize: 13, color: "#aaa" }}>
+            IO: {ioWeight}
+            <input
+              type="range"
+              min={0}
+              max={100}
+              value={ioWeight}
+              onChange={(e) => setIoWeight(Number(e.target.value))}
+              style={{ width: "100%" }}
+            />
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
+            <input type="checkbox" checked={previewEnabled} onChange={(e) => setPreviewEnabled(e.target.checked)} />
+            Preview
+          </label>
+        </div>
+      )}
+
+      {filterEnabled && previewEnabled && results && (
+        <table style={{ marginTop: 16, borderCollapse: "collapse", fontSize: 13 }}>
+          <thead>
+            <tr>
+              <th style={previewCellStyle}>Name</th>
+              <th style={previewNumCellStyle}>Logs</th>
+              <th style={previewNumCellStyle}>IO</th>
+              <th style={previewNumCellStyle}>ILvl</th>
+              <th style={previewNumCellStyle}>Score</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rankResults(results, logsWeight, ioWeight).map((r) => (
+              <tr key={r.key}>
+                <td style={previewCellStyle}>{r.name}</td>
+                <td style={previewNumCellStyle}>{r.error ? "-" : r.best.toFixed(1)}</td>
+                <td style={previewNumCellStyle}>{r.ioScore > 0 ? r.ioScore.toFixed(0) : "-"}</td>
+                <td style={previewNumCellStyle}>{r.itemLevel > 0 ? r.itemLevel.toFixed(0) : "-"}</td>
+                <td style={{ ...previewNumCellStyle, color: percentileColor(r.score), fontWeight: 700 }}>
+                  {r.score.toFixed(1)}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
 
       <p style={{ marginTop: 20, textAlign: "center" }}>
         <button
