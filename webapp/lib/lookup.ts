@@ -8,20 +8,16 @@
 import { getCharacterProfile, hasData, runsEstimate, toServerSlug } from "./wcl";
 import { getRioProfile } from "./rio";
 
-const REGION = process.env.NEXT_PUBLIC_WCL_REGION ?? "EU";
+export const REGION = process.env.NEXT_PUBLIC_WCL_REGION ?? "EU";
 const ZONE_ID = Number(process.env.NEXT_PUBLIC_WCL_ZONE_ID);
 const PARTITION = Number(process.env.NEXT_PUBLIC_WCL_PARTITION);
 
-// How many WCL requests to run at once. WCL's rate limit is a points/hour
-// budget (~3600/hour, ~1 point/query -- see lib/wcl.ts) which a typical
-// Group Finder batch (a few dozen names) barely dents, so the hourly
-// budget isn't the binding constraint here -- it's whatever undocumented
-// per-second/burst protection WCL's API may have (one forum report
-// mentioned 429s after a few hundred rapid requests). 5 concurrent
-// requests is a conservative middle ground: much faster than one-at-a-time
-// without hammering the API. Raise it if this proves too conservative in
-// practice.
-const CONCURRENCY = 5;
+// How many characters to process at once. WCL's rate limit is a
+// points/hour budget (~3600/hour, ~1 point/query -- see lib/wcl.ts) which a
+// typical Group Finder batch (a few dozen names) barely dents, and
+// raider.io's documented unauthenticated cap is 200 requests/minute -- for
+// a short burst like this, neither is the binding constraint.
+const CONCURRENCY = 10;
 
 // Thrown for the two user-facing failure cases here, carrying a stable code
 // instead of a hardcoded-language message -- the UI maps the code to the
@@ -45,9 +41,11 @@ export interface LookupResult {
   best: number;
   median: number;
   runs: number;
-  // raider.io data, fetched in parallel with the WCL lookup -- 0 when
-  // raider.io has no profile for this character (never blocks the result,
-  // same as a missing WCL log).
+  // raider.io data -- 0 until fetchRioScores() has been run for this
+  // result (lazy: only fetched once the "Filter" toggle is switched on,
+  // see LookupForm.tsx -- raider.io's on-demand "crawl" for a character it
+  // hasn't recently cached can take several seconds, so this is skipped
+  // entirely for the common case of never enabling Filter at all).
   ioScore: number;
   itemLevel: number;
   error?: string;
@@ -69,25 +67,13 @@ async function lookupOne(name: string, realm: string, clientId: string, clientSe
   const key = `${name}-${realm}`;
   const slug = toServerSlug(realm);
 
-  // WCL and raider.io are two independent, unrelated APIs -- run them
-  // concurrently instead of one after the other, halving the latency per
-  // character. A raider.io failure never affects the WCL result or vice
-  // versa (getRioProfile never throws, resolves to null instead).
-  const [profileResult, rioProfile] = await Promise.all([
-    getCharacterProfile(name, slug, REGION, ZONE_ID, PARTITION, clientId, clientSecret)
-      .then((profile) => ({ profile, error: undefined as string | undefined }))
-      .catch((err) => ({ profile: null, error: (err as Error).message })),
-    getRioProfile(name, slug, REGION),
-  ]);
-
-  const ioScore = rioProfile?.score ?? 0;
-  const itemLevel = rioProfile?.itemLevel ?? 0;
-
-  if (profileResult.error) {
-    return { key, name, realm, classId: null, found: false, best: 0, median: 0, runs: 0, ioScore, itemLevel, error: profileResult.error };
+  let profile;
+  try {
+    profile = await getCharacterProfile(name, slug, REGION, ZONE_ID, PARTITION, clientId, clientSecret);
+  } catch (err) {
+    return { key, name, realm, classId: null, found: false, best: 0, median: 0, runs: 0, ioScore: 0, itemLevel: 0, error: (err as Error).message };
   }
 
-  const profile = profileResult.profile;
   if (profile?.role === "tank" || profile?.role === "healer") {
     return null;
   }
@@ -103,13 +89,24 @@ async function lookupOne(name: string, realm: string, clientId: string, clientSe
       best: zr.bestPerformanceAverage,
       median: zr.medianPerformanceAverage ?? 0,
       runs: runsEstimate(zr),
-      ioScore,
-      itemLevel,
+      ioScore: 0,
+      itemLevel: 0,
     };
   }
   // Known to WCL (or not) but no logs for this zone/partition -- show as
   // a flat 0 rather than a placeholder string.
-  return { key, name, realm, classId: profile?.classId ?? null, found: false, best: 0, median: 0, runs: 0, ioScore, itemLevel };
+  return { key, name, realm, classId: profile?.classId ?? null, found: false, best: 0, median: 0, runs: 0, ioScore: 0, itemLevel: 0 };
+}
+
+// Fetches raider.io data for an existing result set and returns a new array
+// with ioScore/itemLevel filled in -- called separately (and lazily, only
+// when needed) rather than as part of lookupOne/runLookup, see
+// LookupResult's ioScore field comment for why.
+export async function fetchRioScores(results: LookupResult[], region: string): Promise<LookupResult[]> {
+  return mapWithConcurrency(results, CONCURRENCY, async (r) => {
+    const rio = await getRioProfile(r.name, toServerSlug(r.realm), region);
+    return { ...r, ioScore: rio?.score ?? 0, itemLevel: rio?.itemLevel ?? 0 };
+  });
 }
 
 // Runs `fn` over `items` with at most `concurrency` in flight at once --
@@ -162,6 +159,23 @@ export function rankResults(results: LookupResult[], logsWeight: number, ioWeigh
   });
 
   return scored.sort((a, b) => b.score - a.score);
+}
+
+export interface RankedResult extends LookupResult {
+  rank: number;
+}
+
+// Same weighted scoring as rankResults, but returns results in their
+// ORIGINAL order with a .rank attached (1 = best) instead of physically
+// reordering them. WoW's Group Finder applicant list can't be reordered by
+// an addon (confirmed against Blizzard's own LFGList.lua), so re-sorting
+// the webapp's own view would just make it harder to match against the
+// in-game list -- the rank NUMBER is the useful artifact here, not the
+// row order.
+export function withRanks(results: LookupResult[], logsWeight: number, ioWeight: number): RankedResult[] {
+  const scored = rankResults(results, logsWeight, ioWeight);
+  const rankByKey = new Map(scored.map((r, i) => [r.key, i + 1]));
+  return results.map((r) => ({ ...r, rank: rankByKey.get(r.key)! }));
 }
 
 export async function runLookup(rawNames: string[], clientId: string, clientSecret: string): Promise<LookupResult[]> {

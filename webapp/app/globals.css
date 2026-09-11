@@ -15,3 +15,169 @@
   vertical-align: -2px;
   margin-right: 8px;
 }
+
+/* Card: the one container every screen (onboarding + main) renders inside,
+   so the app always reads as a single centered panel instead of loose
+   floating elements. */
+.qa-card {
+  width: 420px;
+  max-width: calc(100vw - 32px);
+  margin: 0 auto;
+  background: #15181c;
+  border: 1px solid #262b31;
+  border-radius: 16px;
+  padding: 28px 28px 24px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+}
+
+/* Toggle switch, replacing the native checkbox for Preview/Filter -- the
+   hidden checkbox stays the real form control (keyboard/screen-reader
+   accessible), the track+thumb are purely visual, driven by the
+   `:checked + .qa-toggle-track` sibling selector, which inline styles
+   can't express. */
+.qa-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.qa-toggle input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.qa-toggle-track {
+  flex-shrink: 0;
+  width: 38px;
+  height: 22px;
+  border-radius: 999px;
+  background: #2a2f36;
+  position: relative;
+  transition: background-color 0.15s ease;
+}
+
+.qa-toggle-track::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #8a8f96;
+  transition: transform 0.15s ease, background-color 0.15s ease;
+}
+
+.qa-toggle input:checked + .qa-toggle-track {
+  background: #3fc7eb;
+}
+
+.qa-toggle input:checked + .qa-toggle-track::after {
+  transform: translateX(16px);
+  background: #0a0a0a;
+}
+
+.qa-toggle input:focus-visible + .qa-toggle-track {
+  outline: 2px solid #3fc7eb;
+  outline-offset: 2px;
+}
+
+.qa-toggle-label {
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  color: #e8e8e8;
+}
+
+/* Range sliders, flat/modern style instead of the OS default. */
+.qa-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 4px;
+  border-radius: 999px;
+  background: #2a2f36;
+  outline: none;
+  margin: 8px 0 2px;
+}
+
+.qa-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #3fc7eb;
+  border: 2px solid #0a0a0a;
+  cursor: pointer;
+}
+
+.qa-slider::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #3fc7eb;
+  border: 2px solid #0a0a0a;
+  cursor: pointer;
+}
+
+/* Results table: no cell borders, just a header rule and hairline row
+   separators, with a soft hover highlight -- the "everything boxed in
+   harsh 1px borders" look this is replacing needs real :hover support,
+   which inline styles can't provide either. */
+.qa-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.qa-table th {
+  text-align: left;
+  padding: 6px 10px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #7d8590;
+  border-bottom: 1px solid #262b31;
+}
+
+.qa-table td {
+  padding: 7px 10px;
+  border-bottom: 1px solid #1e2227;
+}
+
+.qa-table tbody tr:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.qa-table th:not(:first-child),
+.qa-table td:not(:first-child) {
+  text-align: right;
+}
+
+.qa-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 10px 12px;
+  background: #1c2025;
+  color: #e8e8e8;
+  border: 1px solid #2a2f36;
+  border-radius: 8px;
+  font-size: 14px;
+  transition: border-color 0.15s ease;
+}
+
+.qa-input:focus {
+  outline: none;
+  border-color: #3fc7eb;
+}
+
+.qa-input::placeholder {
+  color: #666;
+}

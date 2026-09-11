@@ -42,7 +42,7 @@ const en: Dict = {
   saveButton: "Save",
   savingButton: "Checking...",
   validationEmptyError: "Please enter Client ID and Secret.",
-  logoutButton: "Log out",
+  logoutButton: "Logout",
   buttonIdle: "Read from Clipboard",
   buttonLoading: "Analyze...",
   buttonDone: "Stored in Clipboard",
