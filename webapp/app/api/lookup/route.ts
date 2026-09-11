@@ -22,9 +22,9 @@ export interface LookupResult {
   realm: string;
   classId: number | null;
   found: boolean;
-  best?: number;
-  median?: number;
-  runs?: number;
+  best: number;
+  median: number;
+  runs: number;
   error?: string;
 }
 
@@ -37,12 +37,20 @@ function parseNameRealm(line: string): { name: string; realm: string } | null {
   return { name: line.slice(0, idx), realm: line.slice(idx + 1) };
 }
 
-async function lookupOne(name: string, realm: string): Promise<LookupResult> {
+// Returns null for characters whose current role is tank or healer -- their
+// DPS percentile is meaningless and just adds noise to a DPS-focused list.
+// Characters we couldn't determine a role for (no cached gameData) are kept.
+async function lookupOne(name: string, realm: string): Promise<LookupResult | null> {
   const key = `${name}-${realm}`;
   const slug = toServerSlug(realm);
 
   try {
     const profile = await getCharacterProfile(name, slug, REGION, ZONE_ID, PARTITION);
+
+    if (profile?.role === "tank" || profile?.role === "healer") {
+      return null;
+    }
+
     const zr = profile?.zoneRankings ?? null;
     if (hasData(zr)) {
       return {
@@ -52,13 +60,15 @@ async function lookupOne(name: string, realm: string): Promise<LookupResult> {
         classId: profile!.classId,
         found: true,
         best: zr.bestPerformanceAverage,
-        median: zr.medianPerformanceAverage ?? undefined,
+        median: zr.medianPerformanceAverage ?? 0,
         runs: runsEstimate(zr),
       };
     }
-    return { key, name, realm, classId: profile?.classId ?? null, found: false };
+    // Known to WCL (or not) but no logs for this zone/partition -- show as
+    // a flat 0 rather than a placeholder string.
+    return { key, name, realm, classId: profile?.classId ?? null, found: false, best: 0, median: 0, runs: 0 };
   } catch (err) {
-    return { key, name, realm, classId: null, found: false, error: (err as Error).message };
+    return { key, name, realm, classId: null, found: false, best: 0, median: 0, runs: 0, error: (err as Error).message };
   }
 }
 
@@ -112,7 +122,9 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Keine gueltigen \"Name-Realm\" Eintraege gefunden" }, { status: 400 });
   }
 
-  const results = await mapWithConcurrency(entries, CONCURRENCY, ({ name, realm }) => lookupOne(name, realm));
+  const results = (await mapWithConcurrency(entries, CONCURRENCY, ({ name, realm }) => lookupOne(name, realm))).filter(
+    (r): r is LookupResult => r !== null
+  );
 
   return NextResponse.json({ results });
 }

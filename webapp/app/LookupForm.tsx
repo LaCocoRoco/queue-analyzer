@@ -8,9 +8,9 @@ interface LookupResult {
   realm: string;
   classId: number | null;
   found: boolean;
-  best?: number;
-  median?: number;
-  runs?: number;
+  best: number;
+  median: number;
+  runs: number;
   error?: string;
 }
 
@@ -42,8 +42,6 @@ const CLASS_COLORS: Record<number, string> = {
 // used for WoW's own item-quality colors, which WCL's grey/green/blue/
 // purple/orange naming deliberately mirrors).
 function percentileColor(pct: number): string {
-  if (pct >= 100) return "#E5CC80"; // gold
-  if (pct >= 99) return "#E268A8"; // pink
   if (pct >= 95) return "#FF8000"; // orange
   if (pct >= 75) return "#A335EE"; // purple
   if (pct >= 50) return "#0070DD"; // blue
@@ -172,26 +170,22 @@ export default function LookupForm() {
                 <td
                   style={{
                     ...numericCellStyle,
-                    color: r.found ? percentileColor(r.best!) : undefined,
-                    fontWeight: r.found ? 700 : undefined,
+                    color: r.error ? undefined : percentileColor(r.best),
+                    fontWeight: 700,
                   }}
                 >
-                  {r.found
-                    ? r.best!.toFixed(1)
-                    : r.error
-                      ? "Fehler"
-                      : "keine Logs"}
+                  {r.error ? "Fehler" : r.best.toFixed(1)}
                 </td>
                 <td
                   style={{
                     ...numericCellStyle,
-                    color: r.found ? percentileColor(r.median!) : undefined,
-                    fontWeight: r.found ? 700 : undefined,
+                    color: r.error ? undefined : percentileColor(r.median),
+                    fontWeight: 700,
                   }}
                 >
-                  {r.found ? r.median!.toFixed(1) : ""}
+                  {r.error ? "" : r.median.toFixed(1)}
                 </td>
-                <td style={numericCellStyle}>{r.found ? r.runs : ""}</td>
+                <td style={numericCellStyle}>{r.error ? "" : r.runs}</td>
               </tr>
             ))}
           </tbody>

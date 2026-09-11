@@ -120,6 +120,54 @@ export interface ZoneRankings {
   rankings: { totalKills: number }[] | null;
 }
 
+export type Role = "tank" | "healer" | "dps";
+
+// Blizzard's official numeric specialization IDs -> role. Stable across
+// expansions, used throughout Blizzard's own API/addon ecosystem. Read from
+// gameData.global.active_spec.id (Blizzard's own cached data, numeric --
+// NOT the .name, which is localized the same way character_class.name is).
+export const ROLE_BY_SPEC_ID: Record<number, Role> = {
+  73: "tank", // Warrior - Protection
+  71: "dps", // Warrior - Arms
+  72: "dps", // Warrior - Fury
+  65: "healer", // Paladin - Holy
+  66: "tank", // Paladin - Protection
+  70: "dps", // Paladin - Retribution
+  253: "dps", // Hunter - Beast Mastery
+  254: "dps", // Hunter - Marksmanship
+  255: "dps", // Hunter - Survival
+  259: "dps", // Rogue - Assassination
+  260: "dps", // Rogue - Outlaw
+  261: "dps", // Rogue - Subtlety
+  256: "healer", // Priest - Discipline
+  257: "healer", // Priest - Holy
+  258: "dps", // Priest - Shadow
+  250: "tank", // Death Knight - Blood
+  251: "dps", // Death Knight - Frost
+  252: "dps", // Death Knight - Unholy
+  262: "dps", // Shaman - Elemental
+  263: "dps", // Shaman - Enhancement
+  264: "healer", // Shaman - Restoration
+  62: "dps", // Mage - Arcane
+  63: "dps", // Mage - Fire
+  64: "dps", // Mage - Frost
+  265: "dps", // Warlock - Affliction
+  266: "dps", // Warlock - Demonology
+  267: "dps", // Warlock - Destruction
+  268: "tank", // Monk - Brewmaster
+  269: "dps", // Monk - Windwalker
+  270: "healer", // Monk - Mistweaver
+  102: "dps", // Druid - Balance
+  103: "dps", // Druid - Feral
+  104: "tank", // Druid - Guardian
+  105: "healer", // Druid - Restoration
+  577: "dps", // Demon Hunter - Havoc
+  581: "tank", // Demon Hunter - Vengeance
+  1467: "dps", // Evoker - Devastation
+  1468: "healer", // Evoker - Preservation
+  1473: "dps", // Evoker - Augmentation
+};
+
 export interface CharacterProfile {
   zoneRankings: ZoneRankings | null;
   // Blizzard's official numeric class ID (see CLASS_BY_ID), or null if WCL
@@ -128,6 +176,9 @@ export interface CharacterProfile {
   // (verified live: classID 1 for a real Death Knight, not Blizzard's
   // official ID 6).
   classId: number | null;
+  // Current role, derived from Blizzard's own active_spec.id (see
+  // ROLE_BY_SPEC_ID), or null if unknown/unrecognized.
+  role: Role | null;
 }
 
 // metric: playerscore (WCL's default M+ ranking metric -- a composite score
@@ -159,12 +210,27 @@ interface RawCharacterProfileData {
   };
 }
 
+interface ParsedGameData {
+  global?: {
+    character_class?: { id?: number };
+    active_spec?: { id?: number };
+  };
+}
+
 function extractClassId(gameData: unknown): number | null {
   if (!gameData || typeof gameData !== "object") {
     return null;
   }
-  const g = gameData as { global?: { character_class?: { id?: number } } };
-  return g.global?.character_class?.id ?? null;
+  return (gameData as ParsedGameData).global?.character_class?.id ?? null;
+}
+
+function extractRole(gameData: unknown): Role | null {
+  if (!gameData || typeof gameData !== "object") {
+    return null;
+  }
+  const specId = (gameData as ParsedGameData).global?.active_spec?.id;
+  if (specId === undefined) return null;
+  return ROLE_BY_SPEC_ID[specId] ?? null;
 }
 
 // getCharacterProfile returns:
@@ -197,6 +263,7 @@ export async function getCharacterProfile(
   return {
     zoneRankings: char.zoneRankings,
     classId: extractClassId(char.gameData),
+    role: extractRole(char.gameData),
   };
 }
 
