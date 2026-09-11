@@ -20,7 +20,7 @@ export interface LookupResult {
   key: string;
   name: string;
   realm: string;
-  className: string | null;
+  classId: number | null;
   found: boolean;
   best?: number;
   median?: number;
@@ -49,16 +49,16 @@ async function lookupOne(name: string, realm: string): Promise<LookupResult> {
         key,
         name,
         realm,
-        className: profile!.className,
+        classId: profile!.classId,
         found: true,
         best: zr.bestPerformanceAverage,
         median: zr.medianPerformanceAverage ?? undefined,
         runs: runsEstimate(zr),
       };
     }
-    return { key, name, realm, className: profile?.className ?? null, found: false };
+    return { key, name, realm, classId: profile?.classId ?? null, found: false };
   } catch (err) {
-    return { key, name, realm, className: null, found: false, error: (err as Error).message };
+    return { key, name, realm, classId: null, found: false, error: (err as Error).message };
   }
 }
 

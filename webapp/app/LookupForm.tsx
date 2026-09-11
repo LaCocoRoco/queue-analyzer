@@ -6,7 +6,7 @@ interface LookupResult {
   key: string;
   name: string;
   realm: string;
-  className: string | null;
+  classId: number | null;
   found: boolean;
   best?: number;
   median?: number;
@@ -14,23 +14,26 @@ interface LookupResult {
   error?: string;
 }
 
-// Standard WoW class colors (RAID_CLASS_COLORS). Duplicated from lib/wcl.ts
-// on purpose -- this is a client component, keep it free of the
-// server-only WCL client code.
-const CLASS_COLORS: Record<string, string> = {
-  "Death Knight": "#C41F3B",
-  "Demon Hunter": "#A330C9",
-  Druid: "#FF7C0A",
-  Evoker: "#33937F",
-  Hunter: "#AAD372",
-  Mage: "#3FC7EB",
-  Monk: "#00FF98",
-  Paladin: "#F58CBA",
-  Priest: "#FFFFFF",
-  Rogue: "#FFF468",
-  Shaman: "#0070DD",
-  Warlock: "#8788EE",
-  Warrior: "#C69B6D",
+// Standard WoW class colors (RAID_CLASS_COLORS), keyed by Blizzard's
+// official numeric class ID. Duplicated from lib/wcl.ts's CLASS_BY_ID on
+// purpose -- this is a client component, keep it free of the server-only
+// WCL client code. Keyed by ID, not name: gameData's class name is
+// localized (a German character came back as "Druide", not "Druid"),
+// while the numeric ID is stable regardless of locale.
+const CLASS_COLORS: Record<number, string> = {
+  1: "#C69B6D", // Warrior
+  2: "#F58CBA", // Paladin
+  3: "#AAD372", // Hunter
+  4: "#FFF468", // Rogue
+  5: "#FFFFFF", // Priest
+  6: "#C41F3B", // Death Knight
+  7: "#0070DD", // Shaman
+  8: "#3FC7EB", // Mage
+  9: "#8788EE", // Warlock
+  10: "#00FF98", // Monk
+  11: "#FF7C0A", // Druid
+  12: "#A330C9", // Demon Hunter
+  13: "#33937F", // Evoker
 };
 
 const cellStyle: CSSProperties = {
@@ -144,7 +147,7 @@ export default function LookupForm() {
                 <td
                   style={{
                     ...cellStyle,
-                    color: r.className ? CLASS_COLORS[r.className] : undefined,
+                    color: r.classId ? CLASS_COLORS[r.classId] : undefined,
                     fontWeight: 600,
                   }}
                 >

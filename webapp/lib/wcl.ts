@@ -92,22 +92,26 @@ export function toServerSlug(realm: string): string {
     .replace(/^-+|-+$/g, "");
 }
 
-// Standard WoW class colors (RAID_CLASS_COLORS), keyed by the class name as
-// returned in gameData.global.character_class.name.
-export const CLASS_COLORS: Record<string, string> = {
-  "Death Knight": "#C41F3B",
-  "Demon Hunter": "#A330C9",
-  Druid: "#FF7C0A",
-  Evoker: "#33937F",
-  Hunter: "#AAD372",
-  Mage: "#3FC7EB",
-  Monk: "#00FF98",
-  Paladin: "#F58CBA",
-  Priest: "#FFFFFF",
-  Rogue: "#FFF468",
-  Shaman: "#0070DD",
-  Warlock: "#8788EE",
-  Warrior: "#C69B6D",
+// Standard WoW class colors (RAID_CLASS_COLORS), keyed by Blizzard's
+// official numeric class ID -- NOT by name. gameData.global.character_class
+// is Blizzard's own data, but its .name is localized to whatever locale WCL
+// cached it under (confirmed live: a German character came back with
+// "Druide", not "Druid" -- silently failing a name-keyed lookup). The
+// numeric .id is locale-independent and stable.
+export const CLASS_BY_ID: Record<number, { name: string; color: string }> = {
+  1: { name: "Warrior", color: "#C69B6D" },
+  2: { name: "Paladin", color: "#F58CBA" },
+  3: { name: "Hunter", color: "#AAD372" },
+  4: { name: "Rogue", color: "#FFF468" },
+  5: { name: "Priest", color: "#FFFFFF" },
+  6: { name: "Death Knight", color: "#C41F3B" },
+  7: { name: "Shaman", color: "#0070DD" },
+  8: { name: "Mage", color: "#3FC7EB" },
+  9: { name: "Warlock", color: "#8788EE" },
+  10: { name: "Monk", color: "#00FF98" },
+  11: { name: "Druid", color: "#FF7C0A" },
+  12: { name: "Demon Hunter", color: "#A330C9" },
+  13: { name: "Evoker", color: "#33937F" },
 };
 
 export interface ZoneRankings {
@@ -118,12 +122,12 @@ export interface ZoneRankings {
 
 export interface CharacterProfile {
   zoneRankings: ZoneRankings | null;
-  // Human-readable class name (e.g. "Death Knight"), or null if WCL hasn't
-  // cached Blizzard game data for this character. NOT the same as WCL's own
-  // `classID` field -- that uses WCL's internal numbering (verified live:
-  // classID 1 for a real Death Knight, not Blizzard's official ID 6) and is
-  // deliberately not used here to avoid miscoloring names.
-  className: string | null;
+  // Blizzard's official numeric class ID (see CLASS_BY_ID), or null if WCL
+  // hasn't cached Blizzard game data for this character. Deliberately not
+  // WCL's own `classID` field -- that uses WCL's internal numbering
+  // (verified live: classID 1 for a real Death Knight, not Blizzard's
+  // official ID 6).
+  classId: number | null;
 }
 
 // metric: playerscore (WCL's default M+ ranking metric -- a composite score
@@ -155,12 +159,12 @@ interface RawCharacterProfileData {
   };
 }
 
-function extractClassName(gameData: unknown): string | null {
+function extractClassId(gameData: unknown): number | null {
   if (!gameData || typeof gameData !== "object") {
     return null;
   }
-  const g = gameData as { global?: { character_class?: { name?: string } } };
-  return g.global?.character_class?.name ?? null;
+  const g = gameData as { global?: { character_class?: { id?: number } } };
+  return g.global?.character_class?.id ?? null;
 }
 
 // getCharacterProfile returns:
@@ -170,7 +174,7 @@ function extractClassName(gameData: unknown): string | null {
 //     (verified live: WCL returns an object with all-null fields here, not
 //     a JSON null -- see hasData())
 //   - a profile with real zoneRankings data otherwise
-// className is populated independently of zoneRankings whenever WCL has
+// classId is populated independently of zoneRankings whenever WCL has
 // cached game data for the character.
 export async function getCharacterProfile(
   name: string,
@@ -192,7 +196,7 @@ export async function getCharacterProfile(
   }
   return {
     zoneRankings: char.zoneRankings,
-    className: extractClassName(char.gameData),
+    classId: extractClassId(char.gameData),
   };
 }
 
