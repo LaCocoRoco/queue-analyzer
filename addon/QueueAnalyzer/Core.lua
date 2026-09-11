@@ -93,11 +93,38 @@ local function GetImportedBest(name, realm)
 	return QueueAnalyzerImportedData[name .. "-" .. realm]
 end
 
+local REPO_URL = "https://github.com/LaCocoRoco/queue-analyzer"
+
+-- WoW's UI widgets have no concept of a clickable external link (chat
+-- hyperlinks only open in-game item/spell/quest panels, never a browser),
+-- so this is just a small label plus a single-line EditBox pre-filled with
+-- the URL -- click it to select-all, then Ctrl+C, same copy pattern as the
+-- rest of the addon. Purely informational: never fetched or used by the
+-- addon itself (no network access in the WoW sandbox anyway).
+local function AddRepoFooter(f)
+	local label = f:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+	label:SetPoint("BOTTOM", 0, 24)
+	label:SetText("Queue Analyzer:")
+
+	local box = CreateFrame("EditBox", nil, f)
+	box:SetSize(360, 14)
+	box:SetPoint("TOP", label, "BOTTOM", 0, -2)
+	box:SetFontObject(GameFontDisableSmall)
+	box:SetJustifyH("CENTER")
+	box:SetAutoFocus(false)
+	box:SetText(REPO_URL)
+	box:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
+	box:SetScript("OnMouseDown", function(self)
+		self:SetFocus()
+		self:HighlightText()
+	end)
+end
+
 local frame
 
 local function CreateExportFrame()
 	local f = CreateFrame("Frame", "QueueAnalyzerExportFrame", UIParent, "BasicFrameTemplateWithInset")
-	f:SetSize(420, 480)
+	f:SetSize(420, 514)
 	f:SetPoint("CENTER")
 	f:SetMovable(true)
 	f:EnableMouse(true)
@@ -119,7 +146,7 @@ local function CreateExportFrame()
 
 	local scrollFrame = CreateFrame("ScrollFrame", nil, f, "UIPanelScrollFrameTemplate")
 	scrollFrame:SetPoint("TOPLEFT", 14, -50)
-	scrollFrame:SetPoint("BOTTOMRIGHT", -30, 44)
+	scrollFrame:SetPoint("BOTTOMRIGHT", -30, 78)
 
 	local editBox = CreateFrame("EditBox", "QueueAnalyzerExportEditBox", scrollFrame)
 	editBox:SetMultiLine(true)
@@ -133,14 +160,16 @@ local function CreateExportFrame()
 	local refreshButton = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
 	refreshButton:SetText("Refresh")
 	refreshButton:SetSize(120, 24)
-	refreshButton:SetPoint("BOTTOM", -65, 10)
+	refreshButton:SetPoint("BOTTOM", -65, 44)
 	refreshButton:SetScript("OnClick", function() QueueAnalyzer_RefreshExport() end)
 
 	local importButton = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
 	importButton:SetText("Open Import")
 	importButton:SetSize(120, 24)
-	importButton:SetPoint("BOTTOM", 65, 10)
+	importButton:SetPoint("BOTTOM", 65, 44)
 	importButton:SetScript("OnClick", function() QueueAnalyzer_ToggleImportFrame() end)
+
+	AddRepoFooter(f)
 
 	return f
 end
@@ -188,7 +217,7 @@ local importFrame
 
 local function CreateImportFrame()
 	local f = CreateFrame("Frame", "QueueAnalyzerImportFrame", UIParent, "BasicFrameTemplateWithInset")
-	f:SetSize(420, 480)
+	f:SetSize(420, 514)
 	-- Anchored to the right of the export window by default so both can sit
 	-- side by side: export on the left (where you copy the applicant list
 	-- from), import on the right (where you paste the webapp's result back
@@ -219,7 +248,7 @@ local function CreateImportFrame()
 
 	local scrollFrame = CreateFrame("ScrollFrame", nil, f, "UIPanelScrollFrameTemplate")
 	scrollFrame:SetPoint("TOPLEFT", 14, -50)
-	scrollFrame:SetPoint("BOTTOMRIGHT", -30, 44)
+	scrollFrame:SetPoint("BOTTOMRIGHT", -30, 78)
 
 	local editBox = CreateFrame("EditBox", "QueueAnalyzerImportEditBox", scrollFrame)
 	editBox:SetMultiLine(true)
@@ -231,13 +260,13 @@ local function CreateImportFrame()
 	f.editBox = editBox
 
 	f.status = f:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-	f.status:SetPoint("BOTTOM", 0, 34)
+	f.status:SetPoint("BOTTOM", 0, 68)
 	f.status:SetText("")
 
 	local importButton = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
 	importButton:SetText("Import")
 	importButton:SetSize(120, 24)
-	importButton:SetPoint("BOTTOM", 0, 10)
+	importButton:SetPoint("BOTTOM", 0, 44)
 	importButton:SetScript("OnClick", function()
 		local data = ParseImportText(f.editBox:GetText())
 		local count = 0
@@ -247,6 +276,8 @@ local function CreateImportFrame()
 		QueueAnalyzerImportedData = data
 		f.status:SetText(count .. " entries imported.")
 	end)
+
+	AddRepoFooter(f)
 
 	return f
 end
