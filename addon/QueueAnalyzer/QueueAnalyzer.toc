@@ -1,6 +1,6 @@
 ## Interface: 120005, 120007
 ## Title: Queue Analyzer
-## Notes: Liest alle Bewerber-Namen einer Gruppenanzeige aus und zeigt sie zum Kopieren an.
+## Notes: Reads all applicant names of a group listing and shows them for copying.
 ## Author: Andreas
 ## Version: 0.2.0
 ## DefaultState: enabled

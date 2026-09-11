@@ -1,5 +1,5 @@
 <Bindings>
-	<Binding name="QUEUEANALYZER_TOGGLE" header="BINDING_HEADER_QUEUEANALYZER" description="Bewerber-Namen anzeigen/exportieren">
+	<Binding name="QUEUEANALYZER_TOGGLE" header="BINDING_HEADER_QUEUEANALYZER" description="Show/export applicant names">
 		QueueAnalyzer_ToggleExportFrame()
 	</Binding>
 </Bindings>

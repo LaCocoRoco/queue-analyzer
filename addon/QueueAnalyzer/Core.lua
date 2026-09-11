@@ -14,7 +14,7 @@
 -- own copy before reading names, to match what you see in the window.
 
 BINDING_HEADER_QUEUEANALYZER = "Queue Analyzer"
-BINDING_NAME_QUEUEANALYZER_TOGGLE = "Bewerber-Namen anzeigen/exportieren"
+BINDING_NAME_QUEUEANALYZER_TOGGLE = "Show/export applicant names"
 
 ---Collect "Name-Realm" for every member of every current applicant.
 ---@return string[] names
@@ -44,6 +44,55 @@ local function GetApplicantNames()
 	return names
 end
 
+-- Data imported from the webapp (pasted into the import window below), keyed
+-- by the same "Name-Realm" string GetApplicantNames() produces, valued by
+-- the WCL "Best" percentile. Session-only (no SavedVariables) -- re-paste
+-- after each /reload, matching the export side which is also always
+-- re-read live.
+QueueAnalyzerImportedData = {}
+
+---Parse the webapp's flat ":"-delimited "Name-Realm:Best:Name-Realm:Best:..."
+---string (see LookupForm.tsx's toImportString) into a lookup table. Safe to
+---split the whole string on ":" since names/realms never contain one.
+---@param text string
+---@return table<string, number>
+local function ParseImportText(text)
+	local data = {}
+	local clean = text:gsub("%s", "") -- strip any incidental whitespace/newlines from pasting
+	local tokens = {}
+	for token in clean:gmatch("[^:]+") do
+		table.insert(tokens, token)
+	end
+	for i = 1, #tokens - 1, 2 do
+		local key = tokens[i]
+		local value = tonumber(tokens[i + 1])
+		if key and value then
+			data[key] = value
+		end
+	end
+	return data
+end
+
+-- Percentile color tiers, matching the webapp's percentileColor() exactly
+-- (same hex values: orange/purple/blue/green/grey).
+local function PercentileColorCode(pct)
+	if pct >= 95 then
+		return "|cffff8000" -- orange
+	elseif pct >= 75 then
+		return "|cffa335ee" -- purple
+	elseif pct >= 50 then
+		return "|cff0070dd" -- blue
+	elseif pct >= 25 then
+		return "|cff1eff00" -- green
+	else
+		return "|cff9d9d9d" -- grey
+	end
+end
+
+local function GetImportedBest(name, realm)
+	return QueueAnalyzerImportedData[name .. "-" .. realm]
+end
+
 local frame
 
 local function CreateExportFrame()
@@ -60,13 +109,13 @@ local function CreateExportFrame()
 
 	f.title = f:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
 	f.title:SetPoint("LEFT", f.TitleBg, "LEFT", 5, 0)
-	f.title:SetText("Queue Analyzer - Bewerber")
+	f.title:SetText("Queue Analyzer - Applicants")
 
 	f.hint = f:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
 	f.hint:SetPoint("TOPLEFT", 14, -30)
 	f.hint:SetPoint("RIGHT", -14, 0)
 	f.hint:SetJustifyH("LEFT")
-	f.hint:SetText("Strg+A, Strg+C zum Kopieren. Nur sichtbar, wenn du Gruppenleiter mit Bewerbern bist.")
+	f.hint:SetText("Ctrl+A, Ctrl+C to copy. Only shows data if you're the group leader with applicants.")
 
 	local scrollFrame = CreateFrame("ScrollFrame", nil, f, "UIPanelScrollFrameTemplate")
 	scrollFrame:SetPoint("TOPLEFT", 14, -50)
@@ -82,10 +131,16 @@ local function CreateExportFrame()
 	f.editBox = editBox
 
 	local refreshButton = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-	refreshButton:SetText("Aktualisieren")
+	refreshButton:SetText("Refresh")
 	refreshButton:SetSize(120, 24)
-	refreshButton:SetPoint("BOTTOM", 0, 10)
+	refreshButton:SetPoint("BOTTOM", -65, 10)
 	refreshButton:SetScript("OnClick", function() QueueAnalyzer_RefreshExport() end)
+
+	local importButton = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+	importButton:SetText("Open Import")
+	importButton:SetSize(120, 24)
+	importButton:SetPoint("BOTTOM", 65, 10)
+	importButton:SetScript("OnClick", function() QueueAnalyzer_ToggleImportFrame() end)
 
 	return f
 end
@@ -98,14 +153,21 @@ function QueueAnalyzer_RefreshExport()
 	local names = GetApplicantNames()
 	local text
 	if #names == 0 then
-		text = "(Keine Bewerber gefunden. Du musst Gruppenleiter einer Anzeige mit Bewerbern sein.)"
+		text = "(No applicants found. You must be the group leader of a listing with applicants.)"
 	else
-		text = table.concat(names, "\n")
+		-- One flat ":"-delimited string instead of one name per line -- easier
+		-- to select/copy reliably as a single line, and the webapp reads it
+		-- back the same way (splits on ":"; names/realms never contain ":").
+		text = table.concat(names, ":")
 	end
 
 	frame.editBox:SetText(text)
-	frame.editBox:HighlightText()
+	-- Order matters: SetFocus() must come before HighlightText() -- the
+	-- reverse order (as this used to be) leaves the text visually selected
+	-- but not reliably in the EditBox's actual input focus, so Ctrl+C does
+	-- nothing until the user manually clicks in and re-selects.
 	frame.editBox:SetFocus()
+	frame.editBox:HighlightText()
 end
 
 function QueueAnalyzer_ToggleExportFrame()
@@ -122,9 +184,95 @@ function QueueAnalyzer_ToggleExportFrame()
 	QueueAnalyzer_RefreshExport()
 end
 
+local importFrame
+
+local function CreateImportFrame()
+	local f = CreateFrame("Frame", "QueueAnalyzerImportFrame", UIParent, "BasicFrameTemplateWithInset")
+	f:SetSize(420, 480)
+	-- Anchored to the right of the export window by default so both can sit
+	-- side by side: export on the left (where you copy the applicant list
+	-- from), import on the right (where you paste the webapp's result back
+	-- in) -- matches the requested "neben dem Fenster, aus dem wir
+	-- exportiert haben" placement. Still freely draggable afterwards.
+	if frame then
+		f:SetPoint("TOPLEFT", frame, "TOPRIGHT", 10, 0)
+	else
+		f:SetPoint("CENTER", 220, 0)
+	end
+	f:SetMovable(true)
+	f:EnableMouse(true)
+	f:RegisterForDrag("LeftButton")
+	f:SetScript("OnDragStart", f.StartMoving)
+	f:SetScript("OnDragStop", f.StopMovingOrSizing)
+	f:SetClampedToScreen(true)
+	tinsert(UISpecialFrames, "QueueAnalyzerImportFrame") -- Escape closes it
+
+	f.title = f:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+	f.title:SetPoint("LEFT", f.TitleBg, "LEFT", 5, 0)
+	f.title:SetText("Queue Analyzer - Import")
+
+	f.hint = f:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+	f.hint:SetPoint("TOPLEFT", 14, -30)
+	f.hint:SetPoint("RIGHT", -14, 0)
+	f.hint:SetJustifyH("LEFT")
+	f.hint:SetText("Paste the text from the webapp here (Ctrl+V) and click Import. The Best value then shows up colored in the applicant tooltip.")
+
+	local scrollFrame = CreateFrame("ScrollFrame", nil, f, "UIPanelScrollFrameTemplate")
+	scrollFrame:SetPoint("TOPLEFT", 14, -50)
+	scrollFrame:SetPoint("BOTTOMRIGHT", -30, 44)
+
+	local editBox = CreateFrame("EditBox", "QueueAnalyzerImportEditBox", scrollFrame)
+	editBox:SetMultiLine(true)
+	editBox:SetFontObject(ChatFontNormal)
+	editBox:SetWidth(360)
+	editBox:SetAutoFocus(false)
+	editBox:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
+	scrollFrame:SetScrollChild(editBox)
+	f.editBox = editBox
+
+	f.status = f:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+	f.status:SetPoint("BOTTOM", 0, 34)
+	f.status:SetText("")
+
+	local importButton = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+	importButton:SetText("Import")
+	importButton:SetSize(120, 24)
+	importButton:SetPoint("BOTTOM", 0, 10)
+	importButton:SetScript("OnClick", function()
+		local data = ParseImportText(f.editBox:GetText())
+		local count = 0
+		for _ in pairs(data) do
+			count = count + 1
+		end
+		QueueAnalyzerImportedData = data
+		f.status:SetText(count .. " entries imported.")
+	end)
+
+	return f
+end
+
+function QueueAnalyzer_ToggleImportFrame()
+	if not importFrame then
+		importFrame = CreateImportFrame()
+	end
+
+	if importFrame:IsShown() then
+		importFrame:Hide()
+		return
+	end
+
+	importFrame:Show()
+	-- Auto-focus (unlike the export box) since the whole point of this box
+	-- is to immediately Ctrl+V into it.
+	importFrame.editBox:SetFocus()
+end
+
 SLASH_QUEUEANALYZER1 = "/qa"
 SLASH_QUEUEANALYZER2 = "/queueanalyzer"
 SlashCmdList["QUEUEANALYZER"] = QueueAnalyzer_ToggleExportFrame
+
+SLASH_QUEUEANALYZERIMPORT1 = "/qai"
+SlashCmdList["QUEUEANALYZERIMPORT"] = QueueAnalyzer_ToggleImportFrame
 
 -- Right-click entry on individual applicants: right-clicking a member row
 -- already opens a Blizzard context menu (Whisper/Report), built with the
@@ -136,7 +284,65 @@ SlashCmdList["QUEUEANALYZER"] = QueueAnalyzer_ToggleExportFrame
 if Menu and Menu.ModifyMenu then
 	Menu.ModifyMenu("MENU_LFG_FRAME_MEMBER_APPLY", function(owner, rootDescription)
 		rootDescription:CreateDivider()
-		rootDescription:CreateButton("Alle Bewerber kopieren (Queue Analyzer)", QueueAnalyzer_ToggleExportFrame)
+		rootDescription:CreateButton("Copy all applicants (Queue Analyzer)", QueueAnalyzer_ToggleExportFrame)
+	end)
+end
+
+-- Walk up from an applicant-member row's frame looking for the ancestor that
+-- carries .applicantID -- Blizzard stores it on the applicant entry frame,
+-- one or two levels above the individual member sub-frame the OnEnter fires
+-- on, and the exact depth isn't worth hardcoding when a short walk covers
+-- it regardless.
+local function FindApplicantID(f)
+	local current = f
+	for _ = 1, 5 do
+		if not current then
+			return nil
+		end
+		if current.applicantID then
+			return current.applicantID
+		end
+		current = current.GetParent and current:GetParent()
+	end
+	return nil
+end
+
+-- Appends the imported "Best" value (colored like the webapp's percentile
+-- tiers) to the tooltip Blizzard already shows when hovering a member of an
+-- applicant in the Application Viewer -- so you can see it while reviewing
+-- applicants instead of alt-tabbing to compare against the webapp table.
+-- LFGListApplicantMember_OnEnter is defined inside Blizzard_GroupFinder,
+-- which is load-on-demand -- same reason AddApplicationViewerButton below
+-- waits for ADDON_LOADED instead of hooking at file-load time.
+local hookedApplicantTooltip = false
+local function HookApplicantTooltip()
+	if hookedApplicantTooltip or not LFGListApplicantMember_OnEnter then
+		return
+	end
+	hookedApplicantTooltip = true
+
+	hooksecurefunc("LFGListApplicantMember_OnEnter", function(self)
+		local applicantID = FindApplicantID(self)
+		local memberIdx = self.memberIdx
+		if not applicantID or not memberIdx then
+			return
+		end
+
+		local fullName = C_LFGList.GetApplicantMemberInfo(applicantID, memberIdx)
+		if not fullName then
+			return
+		end
+		local name, realm = strsplit("-", fullName)
+		if not realm or realm == "" then
+			realm = GetNormalizedRealmName()
+		end
+
+		local best = GetImportedBest(name, realm)
+		if best and GameTooltip:IsOwned(self) then
+			GameTooltip:AddLine(" ")
+			GameTooltip:AddLine("Queue Analyzer Best: " .. PercentileColorCode(best) .. string.format("%.1f", best) .. "|r")
+			GameTooltip:Show()
+		end
 	end)
 end
 
@@ -151,22 +357,27 @@ local function AddApplicationViewerButton()
 
 	local button = CreateFrame("Button", nil, panel, "UIPanelButtonTemplate")
 	button:SetSize(150, 20)
-	button:SetText("Bewerber kopieren")
+	button:SetText("Copy Applicants")
 	button:SetPoint("TOPRIGHT", panel, "TOPRIGHT", -6, -4)
 	button:SetScript("OnClick", QueueAnalyzer_ToggleExportFrame)
 	panel.QueueAnalyzerButton = button
+end
+
+local function OnGroupFinderLoaded()
+	AddApplicationViewerButton()
+	HookApplicantTooltip()
 end
 
 local loader = CreateFrame("Frame")
 loader:RegisterEvent("ADDON_LOADED")
 loader:SetScript("OnEvent", function(_, _, addonName)
 	if addonName == "Blizzard_GroupFinder" then
-		AddApplicationViewerButton()
+		OnGroupFinderLoaded()
 	end
 end)
 
 -- Blizzard_GroupFinder may already be loaded by the time we get here
 -- (e.g. after a /reload while the group finder was open).
 if C_AddOns and C_AddOns.IsAddOnLoaded and C_AddOns.IsAddOnLoaded("Blizzard_GroupFinder") then
-	AddApplicationViewerButton()
+	OnGroupFinderLoaded()
 end
