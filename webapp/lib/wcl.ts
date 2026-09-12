@@ -150,6 +150,92 @@ export interface ZoneRankings {
   rankings: { totalKills: number }[] | null;
 }
 
+const FALLBACK_ZONE_ID = Number(process.env.NEXT_PUBLIC_WCL_ZONE_ID);
+const FALLBACK_PARTITION = Number(process.env.NEXT_PUBLIC_WCL_PARTITION);
+
+export interface SeasonInfo {
+  zoneID: number;
+  partition: number;
+  // Dungeon name (WCL's own spelling, lowercased) -> encounter ID, for the
+  // currently detected Mythic+ season zone. Empty if detection fell back to
+  // the hardcoded env vars below -- Dungeon-mode lookups just degrade to
+  // "no encounter match -> season-wide data" in that case (see
+  // lib/lookup.ts), never wrong data.
+  encountersByName: Map<string, number>;
+}
+
+let cachedSeason: SeasonInfo | null = null;
+
+// Confirmed against WCL's own v2 schema docs (warcraftlogs.com/v2-api-docs):
+// Zone.frozen is permanently true once a zone's data can no longer change
+// (i.e. every past tier), so filtering to frozen: false alone narrows
+// "every zone from every expansion WCL has ever tracked" down to just the
+// small handful currently live. Zone.brackets.type further narrows to
+// specifically the Mythic+ one ("keystone" brackets, per the API's own
+// field description, vs. raids' item-level brackets). Zone.partitions[]
+// .default identifies the current partition within that zone without
+// needing to know its ID ahead of time. Together this is what makes the
+// zoneID/partition pair -- and the dungeon-name/encounterID map alongside
+// it -- self-updating across season transitions with no code change
+// needed, which is the whole point: this keeps working even if nobody is
+// around to bump NEXT_PUBLIC_WCL_ZONE_ID by hand next season.
+const CURRENT_SEASON_QUERY = `
+query {
+  worldData {
+    zones {
+      id
+      frozen
+      brackets { type }
+      partitions { id default }
+      encounters { id name }
+    }
+  }
+}`;
+
+interface RawZone {
+  id: number;
+  frozen: boolean;
+  brackets: { type: string | null } | null;
+  partitions: { id: number; default: boolean }[] | null;
+  encounters: { id: number; name: string }[] | null;
+}
+
+interface RawSeasonData {
+  worldData: { zones: RawZone[] };
+}
+
+// Resolves the current Mythic+ season's zoneID/partition and its
+// dungeon-name -> encounterID map automatically (see CURRENT_SEASON_QUERY
+// above). Falls back to NEXT_PUBLIC_WCL_ZONE_ID/PARTITION (with an empty
+// encounter map) if detection fails for any reason -- a WCL outage or an
+// unexpected API change should never hard-break the whole app over this.
+// Cached for the lifetime of the page load (zones don't change mid-session).
+export async function getCurrentSeason(clientId: string, clientSecret: string): Promise<SeasonInfo> {
+  if (cachedSeason) {
+    return cachedSeason;
+  }
+  try {
+    const data = await wclGraphQL<RawSeasonData>(CURRENT_SEASON_QUERY, {}, clientId, clientSecret);
+    const mplusZone = data.worldData.zones.find(
+      (z) => !z.frozen && (z.brackets?.type ?? "").toLowerCase().includes("keystone")
+    );
+    const defaultPartition = mplusZone?.partitions?.find((p) => p.default)?.id;
+    if (mplusZone && defaultPartition != null) {
+      cachedSeason = {
+        zoneID: mplusZone.id,
+        partition: defaultPartition,
+        encountersByName: new Map((mplusZone.encounters ?? []).map((e) => [e.name.toLowerCase(), e.id])),
+      };
+      return cachedSeason;
+    }
+  } catch {
+    // Fall through to the hardcoded fallback below -- network error, an
+    // unexpected schema shape, or genuinely no matching zone found.
+  }
+  cachedSeason = { zoneID: FALLBACK_ZONE_ID, partition: FALLBACK_PARTITION, encountersByName: new Map() };
+  return cachedSeason;
+}
+
 export type Role = "tank" | "healer" | "dps";
 
 // Blizzard's official numeric specialization IDs -> role. Stable across
@@ -234,6 +320,29 @@ query($name: String!, $serverSlug: String!, $serverRegion: String!, $zoneID: Int
   }
 }`;
 
+// Dungeon-specific equivalent of the query above, used for the webapp's
+// Season/Dungeon toggle's Dungeon mode -- swaps zoneRankings(zoneID: ...)
+// for encounterRankings(encounterID: ...), WCL's per-dungeon rankings
+// field (confirmed against the v2 schema docs: same "playerscore" metric
+// is valid there too). Aliased back to `zoneRankings` in the response so
+// RawCharacterProfileData/getCharacterProfile's parsing code doesn't need
+// a separate branch -- best-effort assumption that it returns the same
+// {bestPerformanceAverage, medianPerformanceAverage, rankings} shape, since
+// WCL's docs don't type JSON-scalar fields and the two endpoints aren't
+// documented as sharing one; the two have nearly identical argument
+// surfaces otherwise, which is the best signal available short of a live
+// test. hasData()'s null-check means a wrong assumption here degrades to
+// "no data shown" rather than wrong numbers.
+const ENCOUNTER_PROFILE_QUERY = `
+query($name: String!, $serverSlug: String!, $serverRegion: String!, $encounterID: Int!, $partition: Int!) {
+  characterData {
+    character(name: $name, serverSlug: $serverSlug, serverRegion: $serverRegion) {
+      gameData
+      zoneRankings: encounterRankings(encounterID: $encounterID, partition: $partition, metric: playerscore)
+    }
+  }
+}`;
+
 interface RawCharacterProfileData {
   characterData: {
     character: { gameData: unknown; zoneRankings: ZoneRankings | null } | null;
@@ -279,14 +388,25 @@ export async function getCharacterProfile(
   zoneID: number,
   partition: number,
   clientId: string,
-  clientSecret: string
+  clientSecret: string,
+  // When set (Dungeon mode), queries encounterRankings for this specific
+  // dungeon instead of zoneRankings for the whole season -- see
+  // ENCOUNTER_PROFILE_QUERY above.
+  encounterID?: number
 ): Promise<CharacterProfile | null> {
-  const data = await wclGraphQL<RawCharacterProfileData>(
-    CHARACTER_PROFILE_QUERY,
-    { name, serverSlug, serverRegion, zoneID, partition },
-    clientId,
-    clientSecret
-  );
+  const data = encounterID
+    ? await wclGraphQL<RawCharacterProfileData>(
+        ENCOUNTER_PROFILE_QUERY,
+        { name, serverSlug, serverRegion, encounterID, partition },
+        clientId,
+        clientSecret
+      )
+    : await wclGraphQL<RawCharacterProfileData>(
+        CHARACTER_PROFILE_QUERY,
+        { name, serverSlug, serverRegion, zoneID, partition },
+        clientId,
+        clientSecret
+      );
   const char = data.characterData.character;
   if (!char) {
     return null;

@@ -16,6 +16,27 @@
 BINDING_HEADER_QUEUEANALYZER = "Queue Analyzer"
 BINDING_NAME_QUEUEANALYZER_TOGGLE = "Show/export applicant names"
 
+---Returns the display name of the Mythic Keystone dungeon for your own
+---current Group Finder listing (used by the webapp's Season/Dungeon toggle
+---to look up dungeon-specific WarcraftLogs data instead of whole-season
+---data), or nil if you have no active listing or it isn't a Keystone
+---activity. Strips the trailing "(Mythic Keystone)"-style parenthetical
+---Blizzard appends to the activity name, to match WarcraftLogs' own plain
+---dungeon names as closely as possible.
+---@return string|nil
+local function GetCurrentDungeonName()
+	local entry = C_LFGList.GetActiveEntryInfo()
+	if not entry or not entry.activityID then
+		return nil
+	end
+	local activityInfo = C_LFGList.GetActivityInfo(entry.activityID)
+	if not activityInfo or not activityInfo.fullName then
+		return nil
+	end
+	local name = activityInfo.fullName:gsub("%s*%b()%s*$", "")
+	return name ~= "" and name or nil
+end
+
 ---Collect "Name-Realm", Blizzard's own Mythic+ rating and item level for
 ---every member of every current applicant, as flat triplets (Name-Realm,
 ---rating, item level, repeating) -- C_LFGList.GetApplicantMemberInfo already
@@ -300,12 +321,25 @@ function QueueAnalyzer_RefreshExport()
 	end
 
 	local entries = GetApplicantNames()
-	-- One flat ":"-delimited string ("Name-Realm:Rating:Name-Realm:Rating:...")
+	local dungeonName = GetCurrentDungeonName() or ""
+
+	-- One flat ":"-delimited string ("DungeonName:Name-Realm:Rating:ItemLevel:...")
 	-- instead of separate lines -- easier to select/copy reliably as a
 	-- single line, and the webapp reads it back the same way (splits on
-	-- ":"; names/realms never contain ":"). Empty when there are no
-	-- applicants -- no placeholder text, just an empty field.
-	local text = table.concat(entries, ":")
+	-- ":"; names/realms/dungeon names never contain ":"). The dungeon name
+	-- is always the first field when there's anything at all to export,
+	-- even if it's itself empty (no active Keystone listing) -- the
+	-- webapp's Season/Dungeon toggle needs a fixed position to read it
+	-- from, and an empty leading field (just ":Name-Realm:...") parses fine
+	-- on that side (see lib/lookup.ts's parseClipboardText, which splits on
+	-- the FIRST colon rather than filtering blanks like the rest of the
+	-- string). But truly empty (no dungeon AND no applicants) stays a
+	-- genuinely empty string, not a stray lone ":" -- that showed up in the
+	-- Export field on every addon startup before any listing existed.
+	local text = ""
+	if dungeonName ~= "" or #entries > 0 then
+		text = dungeonName .. ":" .. table.concat(entries, ":")
+	end
 
 	frame.exportBox:SetText(text)
 	-- Order matters: SetFocus() must come before HighlightText() -- the

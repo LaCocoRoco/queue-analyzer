@@ -6,7 +6,7 @@ import { detectLocale, DICTS, DEFAULT_LOCALE } from "@/lib/i18n";
 import {
   fetchRioScores,
   LookupError,
-  parseClipboardEntries,
+  parseClipboardText,
   REGION,
   runLookup,
   withRanks,
@@ -113,6 +113,20 @@ const BUTTON_COLOR: Record<ButtonState, { bg: string; fg: string }> = {
   error: { bg: "#ff4d4d", fg: "#fff" },
 };
 
+// One of the four stacked button-label spans (see the button's own comment
+// for why they're stacked in the first place) -- each needs its own flex
+// centering since the shared grid cell they all stretch to fill can be
+// taller than a plain text line (the "loading" spinner is the tallest).
+function buttonLabelStyle(visible: boolean): CSSProperties {
+  return {
+    gridArea: "1 / 1",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    visibility: visible ? "visible" : "hidden",
+  };
+}
+
 export default function LookupForm() {
   // Detected once on mount from navigator.languages -- no account/profile to
   // store an explicit preference in, and the default (en, matching SSR/the
@@ -145,6 +159,11 @@ export default function LookupForm() {
   // Which in-game display style the export string requests -- "table"
   // (the default) matches the addon's original readout placement.
   const [displayMode, setDisplayMode] = useState<DisplayMode>("table");
+  // Season (default) uses WCL's whole-season zoneRankings; Dungeon narrows
+  // to just the current Keystone dungeon (see Core.lua's
+  // GetCurrentDungeonName) via encounterRankings instead -- see
+  // runLookup/getCurrentSeason in lib/lookup.ts and lib/wcl.ts.
+  const [dungeonMode, setDungeonMode] = useState<"season" | "dungeon">("season");
   const [logsWeight, setLogsWeight] = useState(50);
   const [ioWeight, setIoWeight] = useState(50);
 
@@ -240,10 +259,12 @@ export default function LookupForm() {
     setButtonState("loading");
     try {
       const rawText = await navigator.clipboard.readText();
-      // The addon exports "Name-Realm:Rating:Name-Realm:Rating:..." now --
-      // Rating is Blizzard's own in-game Mythic+ rating (see Core.lua's
-      // GetApplicantNames), free with the same call that gets the name.
-      const entries = parseClipboardEntries(rawText);
+      // The addon exports "DungeonName:Name-Realm:Rating:ItemLevel:..." now
+      // -- DungeonName is the leader's current Keystone dungeon (empty if
+      // none), Rating/ItemLevel are Blizzard's own in-game values (see
+      // Core.lua's GetApplicantNames/GetCurrentDungeonName), free with the
+      // same call that gets the name.
+      const { dungeonName, entries } = parseClipboardText(rawText);
       if (entries.length === 0) {
         throw new Error(t.errorNoNames);
       }
@@ -251,7 +272,12 @@ export default function LookupForm() {
       const blizzardScoreByKey = new Map(entries.map((e) => [e.key, e.blizzardScore]));
       const blizzardItemLevelByKey = new Map(entries.map((e) => [e.key, e.blizzardItemLevel]));
 
-      let finalResults = await runLookup(names, creds.clientId, creds.clientSecret);
+      let finalResults = await runLookup(
+        names,
+        creds.clientId,
+        creds.clientSecret,
+        dungeonMode === "dungeon" ? dungeonName : null
+      );
       finalResults = finalResults.map((r) => {
         const blizzardItemLevel = blizzardItemLevelByKey.get(r.key) ?? 0;
         return {
@@ -407,6 +433,10 @@ export default function LookupForm() {
         disabled={buttonState === "loading"}
         style={{
           display: "inline-grid",
+          // +2px over the browser's UA-default button font size (13.3333px
+          // in Chrome, confirmed via devtools) -- never explicitly set
+          // before now, so it was riding on that quirky default.
+          fontSize: "15.3333px",
           padding: "10px 18px",
           background: colors.bg,
           color: colors.fg,
@@ -417,28 +447,32 @@ export default function LookupForm() {
         }}
       >
         {/* All four labels are stacked in the same grid cell (only the
-            active one visible) so the grid track sizes to the widest of
-            them -- the button's width is then fixed across state changes
-            instead of jumping around as the text (and its length, which
-            varies per language) changes. */}
-        <span style={{ gridArea: "1 / 1", visibility: buttonState === "idle" ? "visible" : "hidden" }}>
-          {t.buttonIdle}
-        </span>
-        <span style={{ gridArea: "1 / 1", visibility: buttonState === "loading" ? "visible" : "hidden" }}>
+            active one visible) so the grid track sizes to the widest AND
+            tallest of them (the spinner in "loading" is the tallest) --
+            the button's box is then fixed across state changes instead of
+            jumping around as the text (and its length, which varies per
+            language) changes. Each span stretches to fill that cell
+            (default grid align-items/justify-items: stretch), so each one
+            also needs its own flex centering -- otherwise its text just
+            sits at the top of that stretched box instead of centered in
+            it, most visible whenever the cell is taller than a plain text
+            line (i.e. whenever "loading" isn't the active state). */}
+        <span style={buttonLabelStyle(buttonState === "idle")}>{t.buttonIdle}</span>
+        <span style={buttonLabelStyle(buttonState === "loading")}>
           <span className="qa-spinner" />
           {t.buttonLoading}
         </span>
-        <span style={{ gridArea: "1 / 1", visibility: buttonState === "done" ? "visible" : "hidden" }}>
-          {t.buttonDone}
-        </span>
-        <span style={{ gridArea: "1 / 1", visibility: buttonState === "error" ? "visible" : "hidden" }}>
-          {t.buttonErrorRetry}
-        </span>
+        <span style={buttonLabelStyle(buttonState === "done")}>{t.buttonDone}</span>
+        <span style={buttonLabelStyle(buttonState === "error")}>{t.buttonErrorRetry}</span>
       </button>
 
-      {errorMessage && buttonState === "error" && (
-        <p style={{ color: "#ff6b6b", marginTop: 12, fontSize: 13 }}>{errorMessage}</p>
-      )}
+      {/* No inline error message shown here on purpose -- a <p> that only
+          exists while buttonState === "error" pushed everything below it
+          around each time an error appeared/cleared. The button's own
+          "Error - try again" state (color + label) is the only error
+          feedback for now; errorMessage is still tracked in state (see
+          handleReadFromClipboard) in case a non-layout-shifting way to
+          surface it (e.g. a tooltip) gets added later. */}
 
       {/* Preview and Filter are independent toggles, peers of each other:
           Preview alone just shows the table (Name + WCL Log%). Filter alone
@@ -459,31 +493,72 @@ export default function LookupForm() {
         </label>
       </div>
 
-      {/* Blizzard vs RaiderIO -- which source feeds the Score slot once
-          Filter is on. Unchecked (left/default) = Blizzard's own in-game
-          rating, already in the export, no network request. Checked
-          (right) = an actual raider.io lookup. */}
-      <div style={{ marginTop: 14 }}>
-        <label className="qa-toggle qa-toggle-2way">
-          <span className="qa-toggle-label" data-active={!raiderIoEnabled}>
+      {/* The three two-way toggles below share one grid (label | switch |
+          label columns) instead of each being its own centered flex row --
+          that left their switches at different x-positions depending on
+          each row's label text length. The grid keeps all three switches
+          lined up under each other. Each <label> is display:contents so its
+          children become direct grid items (the still-adjacent, just
+          invisible, checkbox stays out of grid flow entirely since it's
+          absolutely positioned -- see .qa-toggle input in globals.css --
+          so it doesn't consume a column). */}
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "1fr auto 1fr",
+          alignItems: "center",
+          rowGap: 10,
+          // .qa-toggle's own `gap` (flex) has no effect once display is
+          // overridden to "contents" below, so the label<->switch spacing
+          // has to come from the grid's own columnGap instead.
+          columnGap: 10,
+          marginTop: 14,
+        }}
+      >
+        {/* Season vs Dungeon -- which WCL data the LOG value comes from.
+            Unchecked (left/default) = the whole season's zoneRankings.
+            Checked (right) = just the leader's current Keystone dungeon
+            (encounterRankings), using the dungeon name the addon exports
+            alongside the applicant list. Falls back to Season data by
+            itself if there's no active Keystone listing or the name
+            doesn't match a known dungeon -- see runLookup in lib/lookup.ts. */}
+        <label className="qa-toggle qa-toggle-2way" style={{ display: "contents" }}>
+          <span className="qa-toggle-label" style={{ justifySelf: "end" }} data-active={dungeonMode === "season"}>
+            Season Log
+          </span>
+          <input
+            type="checkbox"
+            checked={dungeonMode === "dungeon"}
+            onChange={(e) => setDungeonMode(e.target.checked ? "dungeon" : "season")}
+          />
+          <span className="qa-toggle-track" />
+          <span className="qa-toggle-label" style={{ justifySelf: "start" }} data-active={dungeonMode === "dungeon"}>
+            Dungeon Log
+          </span>
+        </label>
+
+        {/* Blizzard vs RaiderIO -- which source feeds the Score slot once
+            Filter is on. Unchecked (left/default) = Blizzard's own in-game
+            rating, already in the export, no network request. Checked
+            (right) = an actual raider.io lookup. */}
+        <label className="qa-toggle qa-toggle-2way" style={{ display: "contents" }}>
+          <span className="qa-toggle-label" style={{ justifySelf: "end" }} data-active={!raiderIoEnabled}>
             Blizzard Score
           </span>
           <input type="checkbox" checked={raiderIoEnabled} onChange={(e) => setRaiderIoEnabled(e.target.checked)} />
           <span className="qa-toggle-track" />
-          <span className="qa-toggle-label" data-active={raiderIoEnabled}>
+          <span className="qa-toggle-label" style={{ justifySelf: "start" }} data-active={raiderIoEnabled}>
             RaiderIO Score
           </span>
         </label>
-      </div>
 
-      {/* Table vs Name -- which in-game display style the export string
-          requests (see Core.lua's QueueAnalyzerDisplayMode), mutually
-          exclusive. Unchecked (left/default) = the role icon/iLvl/Rating
-          readouts. Checked (right) = the Name prefix instead. */}
-      <div style={{ marginTop: 10 }}>
-        <label className="qa-toggle qa-toggle-2way">
-          <span className="qa-toggle-label" data-active={displayMode === "table"}>
-            Import to Table
+        {/* Table vs Name -- which in-game display style the export string
+            requests (see Core.lua's QueueAnalyzerDisplayMode), mutually
+            exclusive. Unchecked (left/default) = the role icon/iLvl/Rating
+            readouts. Checked (right) = the Name prefix instead. */}
+        <label className="qa-toggle qa-toggle-2way" style={{ display: "contents" }}>
+          <span className="qa-toggle-label" style={{ justifySelf: "end" }} data-active={displayMode === "table"}>
+            Table Display
           </span>
           <input
             type="checkbox"
@@ -491,8 +566,8 @@ export default function LookupForm() {
             onChange={(e) => setDisplayMode(e.target.checked ? "name" : "table")}
           />
           <span className="qa-toggle-track" />
-          <span className="qa-toggle-label" data-active={displayMode === "name"}>
-            Import to Name
+          <span className="qa-toggle-label" style={{ justifySelf: "start" }} data-active={displayMode === "name"}>
+            Name Display
           </span>
         </label>
       </div>
@@ -604,9 +679,13 @@ export default function LookupForm() {
             cursor: "pointer",
             padding: 0,
             justifySelf: "end",
-            // 10% of the column's own width, not the whole card -- keeps it
-            // just off the card's right edge instead of flush against it.
+            // Both relative to the column's own width, not the whole card.
+            // marginRight keeps the button itself off the card's right
+            // edge; paddingRight (added on top, per request) widens its own
+            // clickable/visual box a further 10% so the text sits even
+            // further from the edge.
             marginRight: "10%",
+            paddingRight: "10%",
           }}
         >
           Clear

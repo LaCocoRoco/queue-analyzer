@@ -5,12 +5,10 @@
 // this used to be a Next.js API route (server-side), moved here unchanged
 // in logic when the app became a static export with no server at all.
 
-import { getCharacterProfile, hasData, runsEstimate, toServerSlug } from "./wcl";
+import { getCharacterProfile, getCurrentSeason, hasData, runsEstimate, toServerSlug } from "./wcl";
 import { getRioProfile } from "./rio";
 
 export const REGION = process.env.NEXT_PUBLIC_WCL_REGION ?? "EU";
-const ZONE_ID = Number(process.env.NEXT_PUBLIC_WCL_ZONE_ID);
-const PARTITION = Number(process.env.NEXT_PUBLIC_WCL_PARTITION);
 
 // How many characters to process at once. WCL's rate limit is a
 // points/hour budget (~3600/hour, ~1 point/query -- see lib/wcl.ts) which a
@@ -103,16 +101,46 @@ export function parseClipboardEntries(
   return entries;
 }
 
+// The addon actually prepends one more field ahead of the triplets above:
+// "DungeonName:Name-Realm:Rating:ItemLevel:..." -- the current Mythic
+// Keystone dungeon for the leader's own Group Finder listing (see Core.lua's
+// GetCurrentDungeonName), used for the webapp's Season/Dungeon toggle. Always
+// present as a field even when empty (no active Keystone listing), so the
+// split here is on just the FIRST colon rather than reusing
+// parseClipboardEntries' filter(Boolean) split, which would silently drop an
+// empty leading field and misalign every triplet after it.
+export function parseClipboardText(rawText: string): {
+  dungeonName: string | null;
+  entries: { key: string; blizzardScore: number; blizzardItemLevel: number }[];
+} {
+  const trimmed = rawText.trim();
+  const firstColon = trimmed.indexOf(":");
+  const dungeonPart = firstColon >= 0 ? trimmed.slice(0, firstColon) : "";
+  const rest = firstColon >= 0 ? trimmed.slice(firstColon + 1) : "";
+  return {
+    dungeonName: dungeonPart.trim() || null,
+    entries: parseClipboardEntries(rest),
+  };
+}
+
 // Returns null for characters whose current role is tank or healer -- their
 // DPS percentile is meaningless and just adds noise to a DPS-focused list.
 // Characters we couldn't determine a role for (no cached gameData) are kept.
-async function lookupOne(name: string, realm: string, clientId: string, clientSecret: string): Promise<LookupResult | null> {
+async function lookupOne(
+  name: string,
+  realm: string,
+  zoneID: number,
+  partition: number,
+  encounterID: number | undefined,
+  clientId: string,
+  clientSecret: string
+): Promise<LookupResult | null> {
   const key = `${name}-${realm}`;
   const slug = toServerSlug(realm);
 
   let profile;
   try {
-    profile = await getCharacterProfile(name, slug, REGION, ZONE_ID, PARTITION, clientId, clientSecret);
+    profile = await getCharacterProfile(name, slug, REGION, zoneID, partition, clientId, clientSecret, encounterID);
   } catch (err) {
     return {
       key,
@@ -144,7 +172,14 @@ async function lookupOne(name: string, realm: string, clientId: string, clientSe
       realm,
       classId: profile!.classId,
       found: true,
-      best: zr.bestPerformanceAverage,
+      // "best" now actually holds the MEDIAN performance average, not the
+      // best -- the user wants Median used as the Score going forward, and
+      // renaming this field throughout the app (LookupForm.tsx, Core.lua's
+      // export/import) would be a much bigger, purely cosmetic churn for
+      // zero behavior change. hasData() still checks bestPerformanceAverage
+      // specifically (that's WCL's own "has this character logged here at
+      // all" signal), so that check is untouched.
+      best: zr.medianPerformanceAverage ?? 0,
       median: zr.medianPerformanceAverage ?? 0,
       runs: runsEstimate(zr),
       ioScore: 0,
@@ -262,10 +297,25 @@ export function withRanks(results: LookupResult[], logsWeight: number, ioWeight:
   return results.map((r) => ({ ...r, rank: rankByKey.get(r.key)! }));
 }
 
-export async function runLookup(rawNames: string[], clientId: string, clientSecret: string): Promise<LookupResult[]> {
-  if (!ZONE_ID || !PARTITION) {
+// dungeonName: the addon-exported current Keystone dungeon (see
+// parseClipboardText), or null to ignore it -- passed through only when the
+// webapp's Season/Dungeon toggle is set to Dungeon (see LookupForm.tsx). An
+// unrecognized name (not in the current season's encounter list, or simply
+// no active Keystone listing) just leaves encounterID undefined below,
+// which getCharacterProfile treats as "use the season-wide query" -- a
+// silent fallback to Season data rather than an error, since a mismatch
+// here isn't something the user can act on mid-lookup.
+export async function runLookup(
+  rawNames: string[],
+  clientId: string,
+  clientSecret: string,
+  dungeonName: string | null
+): Promise<LookupResult[]> {
+  const season = await getCurrentSeason(clientId, clientSecret);
+  if (!season.zoneID || !season.partition) {
     throw new LookupError("CONFIG_INCOMPLETE");
   }
+  const encounterID = dungeonName ? season.encountersByName.get(dungeonName.toLowerCase()) : undefined;
 
   const entries = rawNames
     .map((l) => l.trim())
@@ -278,7 +328,9 @@ export async function runLookup(rawNames: string[], clientId: string, clientSecr
   }
 
   const results = (
-    await mapWithConcurrency(entries, CONCURRENCY, ({ name, realm }) => lookupOne(name, realm, clientId, clientSecret))
+    await mapWithConcurrency(entries, CONCURRENCY, ({ name, realm }) =>
+      lookupOne(name, realm, season.zoneID, season.partition, encounterID, clientId, clientSecret)
+    )
   ).filter((r): r is LookupResult => r !== null);
 
   return results;
