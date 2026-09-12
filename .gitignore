@@ -13,3 +13,7 @@ webapp/CLAUDE.md
 # OS
 .DS_Store
 Thumbs.db
+
+# Addon build artifacts (packaged locally for manual CurseForge uploads;
+# the addon-release.yml workflow builds its own copy for automated ones)
+/QueueAnalyzer.zip

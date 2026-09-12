@@ -1,0 +1,31 @@
+# Packages addon/QueueAnalyzer and uploads it to CurseForge automatically --
+# only on a pushed tag (e.g. `git tag v0.3.0 && git push --tags`), never on
+# regular commits, so day-to-day pushes don't spam CurseForge with releases.
+#
+# Uses BigWigsMods/packager (the standard WoW addon release tool -- used by
+# most CurseForge addons). It reads the CurseForge project ID from the
+# addon's own QueueAnalyzer.toc ("## X-Curse-Project-ID: 1692771"), and
+# authenticates via the CF_API_TOKEN environment variable -- mapped here
+# from the CF_API_KEY repo secret (that's just the secret's NAME; the value
+# is the same CurseForge API token either way).
+name: Release Addon to CurseForge
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Package and release
+        uses: BigWigsMods/packager@v2
+        working-directory: addon/QueueAnalyzer
+        env:
+          CF_API_TOKEN: ${{ secrets.CF_API_KEY }}

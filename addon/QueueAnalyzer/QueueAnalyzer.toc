@@ -4,5 +4,6 @@
 ## Author: Andreas
 ## Version: 0.2.0
 ## DefaultState: enabled
+## X-Curse-Project-ID: 1692771
 
 Core.lua
