@@ -17,7 +17,11 @@
 # instead of against the real checkout. The synthetic one-commit history is
 # fine -- we don't rely on this tool's git-log-based changelog, and the
 # addon's own version comes from QueueAnalyzer.toc's ## Version line either
-# way.
+# way. The throwaway repo's HEAD also needs the SAME tag that triggered this
+# workflow (github.ref_name) recreated on it -- release.sh classifies the
+# CurseForge upload type (alpha/beta/release) by checking whether HEAD has a
+# matching tag at all (confirmed live: an untagged commit silently uploads
+# as "alpha", regardless of what the real repo's tag was named).
 #
 # Reads the CurseForge project ID from the addon's own QueueAnalyzer.toc
 # ("## X-Curse-Project-ID: 1692771"). Authenticates via the CF_API_TOKEN
@@ -46,6 +50,7 @@ jobs:
           git init -q
           git add -A
           git -c user.email=ci@localhost -c user.name=ci commit -q -m "release"
+          git tag "${{ github.ref_name }}"
 
       - name: Checkout packager
         uses: actions/checkout@v4
