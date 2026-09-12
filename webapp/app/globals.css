@@ -95,11 +95,26 @@
 }
 
 /* Two-way variant (Blizzard/RaiderIO, Table/Name): a label on each side of
-   the same track, instead of one label + on/off -- same track/thumb visuals
-   as the plain toggle. Both labels stay the same active color regardless of
-   which side is selected (the track/thumb position alone shows that) --
-   dimming the unselected side read as confusing/half-disabled rather than
-   as a simple either/or choice. */
+   the same track, instead of one label + on/off. The track/thumb itself
+   stays the same neutral color in both states here -- only its position
+   (translateX, inherited from the plain toggle below) shows the selection;
+   which label is grey vs full-brightness is what communicates the actual
+   choice. */
+.qa-toggle.qa-toggle-2way input:checked + .qa-toggle-track {
+  background: #2a2f36;
+}
+
+.qa-toggle.qa-toggle-2way input:checked + .qa-toggle-track::after {
+  background: #8a8f96;
+}
+
+.qa-toggle-2way .qa-toggle-label {
+  transition: color 0.15s ease;
+}
+
+.qa-toggle-2way .qa-toggle-label[data-active="false"] {
+  color: #5c6470;
+}
 
 /* Range sliders, flat/modern style instead of the OS default. */
 .qa-slider {

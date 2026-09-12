@@ -129,19 +129,61 @@ local function GetImportedData(name, realm)
 	return QueueAnalyzerImportedData[name .. "-" .. realm]
 end
 
+-- Blizzard only repaints an applicant row (which is what actually runs our
+-- HookApplicantReadouts/HookApplicantNamePrefix hooks) when its own
+-- scrolling/recycling code reinitializes that row -- importing new data
+-- here doesn't trigger that, which is why the freshly imported best/rank
+-- previously only showed up after scrolling the list up/down (confirmed:
+-- that's the same underlying mechanism, just Blizzard-triggered instead of
+-- us triggering it). There's no stable public "just redraw everything" API
+-- for this list (and it's changed across expansions), so instead of
+-- guessing at one, this walks every descendant frame of the applicant
+-- panel looking for member sub-frames -- identified by .memberIdx, which
+-- Blizzard sets directly on them (same field HookApplicantTooltip already
+-- reads) -- and re-invokes the exact same per-member update function
+-- Blizzard itself calls to paint a row. Guaranteed correct since it's the
+-- very code path our own hooks already piggyback on; just called by us,
+-- right after an import, instead of waiting for a scroll to trigger it.
+local function RefreshApplicantListDisplay()
+	local panel = LFGListFrame and LFGListFrame.ApplicationViewer
+	if not panel or not LFGListApplicationViewer_UpdateApplicantMember then
+		return
+	end
+
+	local function Walk(f, applicantID)
+		for _, child in ipairs({ f:GetChildren() }) do
+			local childApplicantID = child.applicantID or applicantID
+			if child.memberIdx and childApplicantID then
+				LFGListApplicationViewer_UpdateApplicantMember(child, childApplicantID, child.memberIdx)
+			end
+			Walk(child, childApplicantID)
+		end
+	end
+	Walk(panel, nil)
+end
+
 local REPO_URL = "https://github.com/LaCocoRoco/queue-analyzer"
 
 -- WoW has no concept of a clickable external link (chat hyperlinks only
 -- open in-game item/spell/quest panels, never a browser), so this is just
 -- a single-line EditBox pre-filled with the URL -- click it to select-all,
--- then Ctrl+C, same copy pattern as the export/import boxes below.
--- Informational only: never fetched or used by the addon itself.
+-- then Ctrl+C, same copy pattern as the export/import boxes below. Sits in
+-- the title bar itself, right-aligned next to "Analyzer" -- same grey
+-- (GameFontDisableSmall) as before, just relocated now that the window no
+-- longer has a dedicated footer row. Stops well short of TOPRIGHT to clear
+-- BasicFrameTemplateWithInset's built-in close button. Informational only:
+-- never fetched or used by the addon itself.
 local function AddRepoFooter(f)
 	local box = CreateFrame("EditBox", nil, f)
-	box:SetSize(280, 14)
-	box:SetPoint("BOTTOM", 0, 14)
+	-- Wide enough for the full URL text at GameFontDisableSmall -- too
+	-- narrow (190) clipped it, and since an EditBox's cursor lands at the
+	-- END of the text after SetText, a too-narrow box scrolls to show the
+	-- TAIL of the string instead of the start, not an ellipsis -- which
+	-- looked like "CocoRoco/queue-analyzer" instead of the full github.com/... URL.
+	box:SetSize(260, 14)
+	box:SetPoint("RIGHT", f.TitleBg, "RIGHT", -20, 0)
 	box:SetFontObject(GameFontDisableSmall)
-	box:SetJustifyH("CENTER")
+	box:SetJustifyH("RIGHT")
 	box:SetAutoFocus(false)
 	box:SetText(REPO_URL)
 	box:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
@@ -161,13 +203,10 @@ local frame
 -- made it fiddly to know where to click to select everything.
 local function CreateQueueAnalyzerFrame()
 	local f = CreateFrame("Frame", "QueueAnalyzerFrame", UIParent, "BasicFrameTemplateWithInset")
-	-- Shorter than the export/import rows strictly need -- there was dead
-	-- space between the status line and the footer, in the way when
-	-- dragging the window to a new spot. Everything above (title/export/
-	-- import/status) is anchored from the TOP, so trimming this only eats
-	-- into that gap; the footer (anchored from BOTTOM) just moves up to
-	-- close it.
-	f:SetSize(380, 136)
+	-- Shorter than the original -- the repo-link footer row moved into the
+	-- title bar itself (see AddRepoFooter), so there's no more dedicated
+	-- footer space to leave room for below the status line.
+	f:SetSize(380, 120)
 	-- Docked to the right of the Group Finder window, bottom edges aligned
 	-- (not below it, not vertically centered on it either) -- RaiderIO's
 	-- own overlay panel sits to the right near the TOP of LFGListFrame, so
@@ -242,6 +281,7 @@ local function CreateQueueAnalyzerFrame()
 		end
 		QueueAnalyzerImportedData = data
 		QueueAnalyzerDisplayMode = mode
+		RefreshApplicantListDisplay()
 		f.status:SetText(count .. " entries imported.")
 	end)
 
@@ -440,32 +480,18 @@ local function AddApplicationViewerButton()
 	panel.QueueAnalyzerButton = button
 end
 
--- Compact LOG/Rank readout squeezed into the Role column's own leftover
--- space, right after whichever role icon is actually the rightmost visible
--- one (applicants show 1-3 icons depending on which roles they're flexible
--- for) -- anchored to that icon instead of a fixed x-offset so it adapts
--- automatically instead of assuming a fixed icon count. Deliberately no
--- header label and the smallest available font: LFGListFrame can't be
--- resized (both corners are anchored, so SetWidth is a no-op -- confirmed
--- live), so unlike the name prefix, this has zero room to spare.
-local function GetLastRoleIcon(member)
-	if member.RoleIcon3:IsShown() then
-		return member.RoleIcon3
-	end
-	if member.RoleIcon2:IsShown() then
-		return member.RoleIcon2
-	end
-	return member.RoleIcon1
-end
-
--- "Table" mode: three small readouts anchored next to the role icon, iLvl
--- and Rating columns respectively -- the alternative to the name-prefix
--- approach above (HookApplicantNamePrefix), never both at once (see
--- QueueAnalyzerDisplayMode, set from the webapp's Table/Name toggle):
---   1. After the last role icon: rank + log combined.
---   2. After iLvl: rank alone, anchored to member.ItemLevel same way (1) is
---      anchored to the role icon.
---   3. After Rating: log alone, anchored to member.Rating the same way.
+-- "Table" mode: two small readouts anchored next to the iLvl and Rating
+-- columns -- the alternative to the name-prefix approach above
+-- (HookApplicantNamePrefix), never both at once (see QueueAnalyzerDisplayMode,
+-- set from the webapp's Table/Name toggle). Deliberately no header label
+-- and the smallest available font: LFGListFrame can't be resized (both
+-- corners are anchored, so SetWidth is a no-op -- confirmed live), so this
+-- has zero room to spare.
+--   1. After iLvl: rank, anchored to member.ItemLevel.
+--   2. After Rating: log, anchored to member.Rating the same way. No longer
+--      anything next to the role icon -- that spot was too cramped once
+--      applicants show 2-3 role icons, and iLvl/Rating already cover
+--      rank+log between them.
 local hookedApplicantReadouts = false
 local function HookApplicantReadouts()
 	if hookedApplicantReadouts or not LFGListApplicationViewer_UpdateApplicantMember then
@@ -488,9 +514,6 @@ local function HookApplicantReadouts()
 		-- earlier this session) rather than leaving stale numbers up.
 		local data = QueueAnalyzerDisplayMode == "table" and GetImportedData(name, realm) or nil
 
-		if not member.QueueAnalyzerRoleReadout then
-			member.QueueAnalyzerRoleReadout = member:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-		end
 		if not member.QueueAnalyzerIlvlReadout then
 			member.QueueAnalyzerIlvlReadout = member:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
 		end
@@ -499,18 +522,10 @@ local function HookApplicantReadouts()
 		end
 
 		if not data then
-			member.QueueAnalyzerRoleReadout:SetText("")
 			member.QueueAnalyzerIlvlReadout:SetText("")
 			member.QueueAnalyzerRatingReadout:SetText("")
 			return
 		end
-
-		-- Re-anchored every update (not just on creation) since which role
-		-- icon is the rightmost visible one can change between applicants.
-		member.QueueAnalyzerRoleReadout:ClearAllPoints()
-		member.QueueAnalyzerRoleReadout:SetPoint("LEFT", GetLastRoleIcon(member), "RIGHT", 2, 0)
-		local roleText = data.rank > 0 and string.format("%02d %d", data.rank, data.best) or tostring(data.best)
-		member.QueueAnalyzerRoleReadout:SetText(PercentileColorCode(data.best) .. roleText .. "|r")
 
 		member.QueueAnalyzerIlvlReadout:ClearAllPoints()
 		member.QueueAnalyzerIlvlReadout:SetPoint("LEFT", member.ItemLevel, "RIGHT", 2, 0)

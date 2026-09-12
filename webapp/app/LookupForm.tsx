@@ -465,10 +465,14 @@ export default function LookupForm() {
           (right) = an actual raider.io lookup. */}
       <div style={{ marginTop: 14 }}>
         <label className="qa-toggle qa-toggle-2way">
-          <span className="qa-toggle-label">Blizzard Score</span>
+          <span className="qa-toggle-label" data-active={!raiderIoEnabled}>
+            Blizzard Score
+          </span>
           <input type="checkbox" checked={raiderIoEnabled} onChange={(e) => setRaiderIoEnabled(e.target.checked)} />
           <span className="qa-toggle-track" />
-          <span className="qa-toggle-label">RaiderIO Score</span>
+          <span className="qa-toggle-label" data-active={raiderIoEnabled}>
+            RaiderIO Score
+          </span>
         </label>
       </div>
 
@@ -478,14 +482,18 @@ export default function LookupForm() {
           readouts. Checked (right) = the Name prefix instead. */}
       <div style={{ marginTop: 10 }}>
         <label className="qa-toggle qa-toggle-2way">
-          <span className="qa-toggle-label">Import to Table</span>
+          <span className="qa-toggle-label" data-active={displayMode === "table"}>
+            Import to Table
+          </span>
           <input
             type="checkbox"
             checked={displayMode === "name"}
             onChange={(e) => setDisplayMode(e.target.checked ? "name" : "table")}
           />
           <span className="qa-toggle-track" />
-          <span className="qa-toggle-label">Import to Name</span>
+          <span className="qa-toggle-label" data-active={displayMode === "name"}>
+            Import to Name
+          </span>
         </label>
       </div>
 
