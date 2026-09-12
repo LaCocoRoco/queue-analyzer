@@ -9,6 +9,7 @@ import {
   parseClipboardText,
   REGION,
   runLookup,
+  withEffectiveMode,
   withRanks,
   type LookupResult,
   type RankedResult,
@@ -79,7 +80,7 @@ function formatRank(rank: number): string {
 }
 
 // Copies Blizzard's own in-game Mythic+ rating (blizzardScore, sent by the
-// addon alongside each name -- see lib/lookup.ts's parseClipboardEntries)
+// addon alongside each name -- see lib/lookup.ts's parseClipboardText)
 // into the ioScore/ioColor slot, so the rest of the app (ranking, the IO
 // table column) doesn't need to know or care which source it came from.
 // Used whenever Filter is on but the RaiderIO toggle isn't -- no network
@@ -198,8 +199,11 @@ export default function LookupForm() {
     setRioLoaded(false);
   }, [raiderIoEnabled]);
 
+  // No longer gated on filterEnabled -- the Score column is always shown
+  // now (not just while Filter is on), so the IO slot needs to be ready
+  // regardless of that toggle.
   useEffect(() => {
-    if (!filterEnabled || !results || rioLoaded || rioLoading) {
+    if (!results || rioLoaded || rioLoading) {
       return;
     }
     if (!raiderIoEnabled) {
@@ -214,7 +218,7 @@ export default function LookupForm() {
         setRioLoaded(true);
       })
       .finally(() => setRioLoading(false));
-  }, [filterEnabled, raiderIoEnabled, results, rioLoaded, rioLoading]);
+  }, [raiderIoEnabled, results, rioLoaded, rioLoading]);
 
   async function handleSaveCredentials() {
     setValidationError(null);
@@ -276,12 +280,11 @@ export default function LookupForm() {
       const blizzardScoreByKey = new Map(entries.map((e) => [e.key, e.blizzardScore]));
       const blizzardItemLevelByKey = new Map(entries.map((e) => [e.key, e.blizzardItemLevel]));
 
-      let finalResults = await runLookup(
-        names,
-        creds.clientId,
-        creds.clientSecret,
-        dungeonMode === "dungeon" ? dungeonName : null
-      );
+      // Always resolved regardless of dungeonMode -- both season and
+      // dungeon values get fetched every time (one WCL query covers both,
+      // see lib/wcl.ts), so switching the Season/Dungeon toggle afterwards
+      // can update the table instantly instead of needing a re-import.
+      let finalResults = await runLookup(names, creds.clientId, creds.clientSecret, dungeonName);
       finalResults = finalResults.map((r) => {
         const blizzardItemLevel = blizzardItemLevelByKey.get(r.key) ?? 0;
         return {
@@ -295,26 +298,19 @@ export default function LookupForm() {
         };
       });
 
-      // Lazy-loading raider.io (see the effect above) is only for turning
-      // Filter on AFTER an already-finished lookup. If Filter is already on
-      // right now, there's no "later" to defer to -- resolve the IO slot
-      // before this handler is done, same as the pre-lazy-load design, so
-      // the button doesn't claim "done" (and the table doesn't stop
-      // spinning) while it's still missing. Only an actual network wait
-      // (raider.io) needs that upfront resolve -- Blizzard's rating is
-      // already in finalResults from the export, applying it is instant.
-      if (filterEnabled) {
-        if (raiderIoEnabled) {
-          setRioLoading(true);
-          finalResults = await fetchRioScores(finalResults, REGION);
-          setRioLoading(false);
-        } else {
-          finalResults = applyBlizzardScoreAsIo(finalResults);
-        }
-        setRioLoaded(true);
+      // The Score column is always shown now (not just while Filter is on),
+      // so the IO slot always needs resolving here -- same as before, just
+      // no longer gated on filterEnabled. Lazy-loading raider.io (see the
+      // effect above) is now only for turning the RaiderIO toggle on/off
+      // AFTER an already-finished lookup, not for Filter.
+      if (raiderIoEnabled) {
+        setRioLoading(true);
+        finalResults = await fetchRioScores(finalResults, REGION);
+        setRioLoading(false);
       } else {
-        setRioLoaded(false);
+        finalResults = applyBlizzardScoreAsIo(finalResults);
       }
+      setRioLoaded(true);
       setResults(finalResults);
 
       // Always exported in the original applicant-list order, filter or
@@ -328,7 +324,7 @@ export default function LookupForm() {
       // off, so applicants still get a rank in-game even without ever
       // touching Filter.
       const rankedResults: RankedResult[] = withRanks(
-        finalResults,
+        withEffectiveMode(finalResults, dungeonMode),
         filterEnabled ? logsWeight : 100,
         filterEnabled ? ioWeight : 0
       );
@@ -415,16 +411,20 @@ export default function LookupForm() {
 
   const colors = BUTTON_COLOR[buttonState];
 
-  // A rank is always shown now, filter or not -- pure Logs ranking
-  // (ioWeight 0) until Filter is actually on AND raider.io data has
-  // arrived; using the real ioWeight before rioLoaded would rank everyone
-  // as if their IO score were 0, a confusing order that's about to jump
-  // around the moment the fetch finishes.
-  const showIoColumn = filterEnabled && rioLoaded;
-  const effectiveLogsWeight = showIoColumn ? logsWeight : 100;
-  const effectiveIoWeight = showIoColumn ? ioWeight : 0;
+  // Score column: shown and populated regardless of Filter now -- only
+  // waits on rioLoaded (the actual data being ready), not on the Filter
+  // toggle.
+  const showIoColumn = rioLoaded;
+  // Rank/weighting: still Filter's actual job -- a rank is always shown,
+  // but it only blends in the Score (via the weight sliders) once Filter
+  // is on AND raider.io data has arrived; using the real ioWeight before
+  // rioLoaded would rank everyone as if their IO score were 0, a confusing
+  // order that's about to jump around the moment the fetch finishes.
+  const useWeightedRanking = filterEnabled && rioLoaded;
+  const effectiveLogsWeight = useWeightedRanking ? logsWeight : 100;
+  const effectiveIoWeight = useWeightedRanking ? ioWeight : 0;
   const displayRows = results
-    ? withRanks(results, effectiveLogsWeight, effectiveIoWeight)
+    ? withRanks(withEffectiveMode(results, dungeonMode), effectiveLogsWeight, effectiveIoWeight)
         .slice()
         .sort((a, b) => a.rank - b.rank)
     : [];
@@ -615,7 +615,7 @@ export default function LookupForm() {
               <th style={{ textAlign: "left" }}>Name</th>
               <th>iLvl</th>
               <th>LOG</th>
-              {filterEnabled && <th>Score</th>}
+              <th>Score</th>
             </tr>
           </thead>
           <tbody>
@@ -640,11 +640,9 @@ export default function LookupForm() {
                 <td style={{ color: r.error ? undefined : percentileColor(r.best), fontWeight: 700 }}>
                   {r.error ? "-" : String(Math.round(r.best)).padStart(2, "0")}
                 </td>
-                {filterEnabled && (
-                  <td style={{ color: showIoColumn && r.ioScore > 0 ? r.ioColor : undefined, fontWeight: 700 }}>
-                    {showIoColumn ? (r.ioScore > 0 ? Math.round(r.ioScore) : "-") : <span className="qa-spinner" />}
-                  </td>
-                )}
+                <td style={{ color: showIoColumn && r.ioScore > 0 ? r.ioColor : undefined, fontWeight: 700 }}>
+                  {showIoColumn ? (r.ioScore > 0 ? Math.round(r.ioScore) : "-") : <span className="qa-spinner" />}
+                </td>
               </tr>
             ))}
           </tbody>

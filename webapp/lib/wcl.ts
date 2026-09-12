@@ -150,6 +150,26 @@ export interface ZoneRankings {
   rankings: { totalKills: number }[] | null;
 }
 
+// A specific dungeon's own raw-throughput percentile (Dungeon mode), as
+// opposed to ZoneRankings' whole-season points-based score (Season mode).
+// Needs its OWN query (see ENCOUNTER_PROFILE_QUERY) -- this is NOT the same
+// number as ZoneRankings' embedded per-encounter breakdown, confirmed live
+// against a real character's WCL page (that embedded data read 13 where the
+// site's own per-dungeon detail page showed 37.1). The critical piece is
+// byBracket: true -- without it, WCL compares a run against ALL logs of
+// that dungeon regardless of keystone level, which reads much lower than
+// what the site actually displays; byBracket compares each run only within
+// its own key-level bracket first, then blends those -- confirmed live,
+// exact match (37.08 vs the site's displayed 37.1) on medianPerformance,
+// bestAmount, totalKills, and fastestKill all at once.
+export interface EncounterRanking {
+  bestAmount: number | null;
+  medianPerformance: number | null;
+  averagePerformance: number | null;
+  totalKills: number;
+  fastestKill: number | null;
+}
+
 const FALLBACK_ZONE_ID = Number(process.env.NEXT_PUBLIC_WCL_ZONE_ID);
 const FALLBACK_PARTITION = Number(process.env.NEXT_PUBLIC_WCL_PARTITION);
 
@@ -286,6 +306,9 @@ export const ROLE_BY_SPEC_ID: Record<number, Role> = {
 
 export interface CharacterProfile {
   zoneRankings: ZoneRankings | null;
+  // Only present when a dungeon-specific lookup was requested (encounterID
+  // given -- see getCharacterProfile) and the character has logs for it.
+  encounterRankings: EncounterRanking | null;
   // Blizzard's official numeric class ID (see CLASS_BY_ID), or null if WCL
   // hasn't cached Blizzard game data for this character. Deliberately not
   // WCL's own `classID` field -- that uses WCL's internal numbering
@@ -297,15 +320,13 @@ export interface CharacterProfile {
   role: Role | null;
 }
 
-// metric: playerscore (WCL's default M+ ranking metric -- a composite score
-// per run, NOT raw damage-per-second) is what the character page's default
-// landing view ("Points" tab) and its "Best/Median DPS % Avg" labels
-// actually show. Confirmed live against a real character: metric: dps gave
-// wrong numbers (7.8/5.76 and a Runs undercount from a different
-// totalKills breakdown), metric: playerscore matched the website exactly
-// (17.49/12.05, and totalKills summing to exactly the displayed Runs
-// count). "default" resolves to the same thing server-side; playerscore is
-// used explicitly here to be unambiguous.
+// metric: points_and_damage -- confirmed live (real character, real key
+// runs) against WCL's own character page: bestPerformanceAverage matches
+// the site's season-wide "Best DPS % Avg" exactly. Healers will eventually
+// use metric: points_and_healing the same way; tanks are intentionally
+// excluded (see lib/lookup.ts's lookupOne) since neither variant means
+// anything meaningful for a role that does little damage or healing by
+// design.
 //
 // gameData is WCL's cached copy of Blizzard's own character profile API
 // response (no extra live Blizzard call -- same cost as the rest of this
@@ -315,30 +336,19 @@ query($name: String!, $serverSlug: String!, $serverRegion: String!, $zoneID: Int
   characterData {
     character(name: $name, serverSlug: $serverSlug, serverRegion: $serverRegion) {
       gameData
-      zoneRankings(zoneID: $zoneID, partition: $partition, metric: playerscore)
+      zoneRankings(zoneID: $zoneID, partition: $partition, metric: points_and_damage)
     }
   }
 }`;
 
-// Dungeon-specific equivalent of the query above, used for the webapp's
-// Season/Dungeon toggle's Dungeon mode -- swaps zoneRankings(zoneID: ...)
-// for encounterRankings(encounterID: ...), WCL's per-dungeon rankings
-// field (confirmed against the v2 schema docs: same "playerscore" metric
-// is valid there too). Aliased back to `zoneRankings` in the response so
-// RawCharacterProfileData/getCharacterProfile's parsing code doesn't need
-// a separate branch -- best-effort assumption that it returns the same
-// {bestPerformanceAverage, medianPerformanceAverage, rankings} shape, since
-// WCL's docs don't type JSON-scalar fields and the two endpoints aren't
-// documented as sharing one; the two have nearly identical argument
-// surfaces otherwise, which is the best signal available short of a live
-// test. hasData()'s null-check means a wrong assumption here degrades to
-// "no data shown" rather than wrong numbers.
+// Dungeon-specific query (Dungeon mode) -- see EncounterRanking's comment
+// for why this needs its own request and its own metric/byBracket
+// combination, rather than reusing anything from the season query above.
 const ENCOUNTER_PROFILE_QUERY = `
 query($name: String!, $serverSlug: String!, $serverRegion: String!, $encounterID: Int!, $partition: Int!) {
   characterData {
     character(name: $name, serverSlug: $serverSlug, serverRegion: $serverRegion) {
-      gameData
-      zoneRankings: encounterRankings(encounterID: $encounterID, partition: $partition, metric: playerscore)
+      encounterRankings(encounterID: $encounterID, partition: $partition, metric: dps, byBracket: true)
     }
   }
 }`;
@@ -346,6 +356,12 @@ query($name: String!, $serverSlug: String!, $serverRegion: String!, $encounterID
 interface RawCharacterProfileData {
   characterData: {
     character: { gameData: unknown; zoneRankings: ZoneRankings | null } | null;
+  };
+}
+
+interface RawEncounterProfileData {
+  characterData: {
+    character: { encounterRankings: EncounterRanking | null } | null;
   };
 }
 
@@ -389,30 +405,35 @@ export async function getCharacterProfile(
   partition: number,
   clientId: string,
   clientSecret: string,
-  // When set (Dungeon mode), queries encounterRankings for this specific
-  // dungeon instead of zoneRankings for the whole season -- see
-  // ENCOUNTER_PROFILE_QUERY above.
+  // When given, also fetches this dungeon's own encounterRankings
+  // alongside the season-wide zoneRankings (both fetched together, always,
+  // regardless of which mode the UI is currently in -- see LookupResult's
+  // comment in lib/lookup.ts for why).
   encounterID?: number
 ): Promise<CharacterProfile | null> {
-  const data = encounterID
-    ? await wclGraphQL<RawCharacterProfileData>(
-        ENCOUNTER_PROFILE_QUERY,
-        { name, serverSlug, serverRegion, encounterID, partition },
-        clientId,
-        clientSecret
-      )
-    : await wclGraphQL<RawCharacterProfileData>(
-        CHARACTER_PROFILE_QUERY,
-        { name, serverSlug, serverRegion, zoneID, partition },
-        clientId,
-        clientSecret
-      );
-  const char = data.characterData.character;
+  const [seasonData, encounterData] = await Promise.all([
+    wclGraphQL<RawCharacterProfileData>(
+      CHARACTER_PROFILE_QUERY,
+      { name, serverSlug, serverRegion, zoneID, partition },
+      clientId,
+      clientSecret
+    ),
+    encounterID != null
+      ? wclGraphQL<RawEncounterProfileData>(
+          ENCOUNTER_PROFILE_QUERY,
+          { name, serverSlug, serverRegion, encounterID, partition },
+          clientId,
+          clientSecret
+        )
+      : Promise.resolve(null),
+  ]);
+  const char = seasonData.characterData.character;
   if (!char) {
     return null;
   }
   return {
     zoneRankings: char.zoneRankings,
+    encounterRankings: encounterData?.characterData.character?.encounterRankings ?? null,
     classId: extractClassId(char.gameData),
     role: extractRole(char.gameData),
   };

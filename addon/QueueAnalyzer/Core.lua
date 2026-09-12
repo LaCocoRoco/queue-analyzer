@@ -37,16 +37,19 @@ local function GetCurrentDungeonName()
 	return name ~= "" and name or nil
 end
 
----Collect "Name-Realm", Blizzard's own Mythic+ rating and item level for
----every member of every current applicant, as flat triplets (Name-Realm,
----rating, item level, repeating) -- C_LFGList.GetApplicantMemberInfo already
----returns dungeonScore (Blizzard's own in-game Mythic+ rating, the same
----number shown in the "Rating" column) and itemLevel in the very same call
----we use for the name, at zero extra cost -- no separate request, no
----network round trip. dungeonScore is a DIFFERENT number from raider.io's
----own score (two independently calculated ratings that happen to correlate
----closely, not the same value) -- the webapp uses it as a fast default and
----only calls raider.io itself if you explicitly ask it to.
+---Collect Name, Server, Blizzard's own item level and Mythic+ rating for
+---every member of every current applicant, as flat quadruplets (Name,
+---Server, ItemLevel, Rating, repeating) -- C_LFGList.GetApplicantMemberInfo
+---already returns itemLevel and dungeonScore (Blizzard's own in-game
+---Mythic+ rating, the same number shown in the "Rating" column) in the very
+---same call we use for the name, at zero extra cost -- no separate request,
+---no network round trip. Name and Server are kept as separate fields
+---(rather than one hyphenated "Name-Realm" string) so the webapp never has
+---to guess a split point on a realm name. dungeonScore is a DIFFERENT
+---number from raider.io's own score (two independently calculated ratings
+---that happen to correlate closely, not the same value) -- the webapp uses
+---it as a fast default and only calls raider.io itself if you explicitly
+---ask it to.
 ---@return string[] entries
 local function GetApplicantNames()
 	local entries = {}
@@ -66,9 +69,10 @@ local function GetApplicantNames()
 					if not realm or realm == "" then
 						realm = GetNormalizedRealmName()
 					end
-					table.insert(entries, name .. "-" .. realm)
-					table.insert(entries, tostring(math.floor((dungeonScore or 0) + 0.5)))
+					table.insert(entries, name)
+					table.insert(entries, realm)
 					table.insert(entries, tostring(math.floor((itemLevel or 0) + 0.5)))
+					table.insert(entries, tostring(math.floor((dungeonScore or 0) + 0.5)))
 				end
 			end
 		end
@@ -349,30 +353,32 @@ function QueueAnalyzer_RefreshExport()
 	local entries = GetApplicantNames()
 	local dungeonName = GetCurrentDungeonName() or ""
 
-	-- One flat ":"-delimited string ("DungeonName:Name-Realm:Rating:ItemLevel:...:EXPORT")
+	-- One flat ":"-delimited string
+	-- ("Name:Server:ItemLevel:Rating:Name:Server:ItemLevel:Rating:...:DungeonName:EXPORT")
 	-- instead of separate lines -- easier to select/copy reliably as a
 	-- single line, and the webapp reads it back the same way (splits on
 	-- ":"; names/realms/dungeon names never contain ":"). The dungeon name
-	-- is always the first field when there's anything at all to export,
-	-- even if it's itself empty (no active Keystone listing) -- the
-	-- webapp's Season/Dungeon toggle needs a fixed position to read it
-	-- from, and an empty leading field (just ":Name-Realm:...") parses fine
-	-- on that side (see lib/lookup.ts's parseClipboardText, which splits on
-	-- the FIRST colon rather than filtering blanks like the rest of the
-	-- string). But truly empty (no dungeon AND no applicants) stays a
-	-- genuinely empty string, not a stray lone ":" -- that showed up in the
-	-- Export field on every addon startup before any listing existed.
+	-- is always the LAST field before the EXPORT marker when there's
+	-- anything at all to export, even if it's itself empty (no active
+	-- Keystone listing) -- it's a single value for the whole listing, not
+	-- per applicant, so it only needs to appear once; the webapp's
+	-- Season/Dungeon toggle needs a fixed position to read it from (see
+	-- lib/lookup.ts's parseClipboardText, which reads the LAST token before
+	-- EXPORT rather than assuming every group of 4 is a member). Truly
+	-- empty (no dungeon AND no applicants) stays a genuinely empty string,
+	-- not a stray marker -- that showed up in the Export field on every
+	-- addon startup before any listing existed.
 	--
 	-- The trailing "EXPORT" token is a self-identifying marker: this
-	-- string's own shape ("stuff:Name-Realm:number:number:...") is close
-	-- enough to the webapp's Import string's shape that pasting THIS
-	-- straight back into the Import box below used to get silently
-	-- "parsed" as if it were real ranked results (confirmed live -- rating/
-	-- item level got read as best/rank). ParseImportText now refuses
-	-- anything that doesn't end in "IMPORT" instead of guessing.
+	-- string's own shape ("Name:Server:number:number:...") is close enough
+	-- to the webapp's Import string's shape that pasting THIS straight back
+	-- into the Import box below used to get silently "parsed" as if it were
+	-- real ranked results (confirmed live -- rating/item level got read as
+	-- best/rank). ParseImportText now refuses anything that doesn't end in
+	-- "IMPORT" instead of guessing.
 	local text = ""
 	if dungeonName ~= "" or #entries > 0 then
-		text = dungeonName .. ":" .. table.concat(entries, ":") .. ":EXPORT"
+		text = table.concat(entries, ":") .. ":" .. dungeonName .. ":EXPORT"
 	end
 
 	frame.exportBox:SetText(text)
