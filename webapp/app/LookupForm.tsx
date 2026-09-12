@@ -15,20 +15,23 @@ import {
 } from "@/lib/lookup";
 import { toServerSlug, validateCredentials } from "@/lib/wcl";
 
-// Flat ":"-delimited "Name-Realm:Best:Rank:Name-Realm:Best:Rank:..." -- the
-// format the addon's import window parses (see Core.lua's ParseImportText).
-// A single line pastes far more reliably into WoW's EditBox than a
-// multi-line block. Safe because names/realms never contain ":". Best is
-// rounded to a whole number -- no decimals in anything that ends up visible
-// in-game. Rank is always present (fixed triplets, never pairs) so the
-// addon-side parser never has to guess the stride -- it's just 0 when
-// Filter wasn't used for this export, which the addon reads as "no rank to
-// show".
-function toExportString(results: RankedResult[]): string {
-  return results
+// Flat ":"-delimited "MODE:Name-Realm:Best:Rank:Name-Realm:Best:Rank:..." --
+// the format the addon's import window parses (see Core.lua's
+// ParseImportText). A single line pastes far more reliably into WoW's
+// EditBox than a multi-line block. Safe because names/realms never contain
+// ":". Best is rounded to a whole number -- no decimals in anything that
+// ends up visible in-game. Rank is always present (fixed triplets, never
+// pairs) so the addon-side parser never has to guess the stride -- it's
+// just 0 when Filter wasn't used for this export, which the addon reads as
+// "no rank to show". The leading MODE token ("TABLE" or "NAME") tells the
+// addon which of its two mutually-exclusive display styles to use -- see
+// the Table/Name toggle below.
+function toExportString(results: RankedResult[], displayMode: DisplayMode): string {
+  const mode = displayMode === "name" ? "NAME" : "TABLE";
+  const triplets = results
     .filter((r) => !r.error)
-    .flatMap((r) => [r.key, Math.round(r.best).toString(), r.rank.toString()])
-    .join(":");
+    .flatMap((r) => [r.key, Math.round(r.best).toString(), r.rank.toString()]);
+  return [mode, ...triplets].join(":");
 }
 
 // Standard WoW class colors (RAID_CLASS_COLORS), keyed by Blizzard's
@@ -95,6 +98,12 @@ function applyBlizzardScoreAsIo(results: LookupResult[]): LookupResult[] {
   });
 }
 
+// Which of the addon's two mutually-exclusive in-game display styles the
+// export string requests -- "table" anchors the readouts next to the role
+// icon/iLvl/Rating columns, "name" prefixes the applicant's Name instead
+// (see Core.lua's QueueAnalyzerDisplayMode).
+type DisplayMode = "table" | "name";
+
 type ButtonState = "idle" | "loading" | "done" | "error";
 
 const BUTTON_COLOR: Record<ButtonState, { bg: string; fg: string }> = {
@@ -133,6 +142,9 @@ export default function LookupForm() {
   // every export, no extra request) is the fast default IO source. Turning
   // this on switches to an actual raider.io lookup instead.
   const [raiderIoEnabled, setRaiderIoEnabled] = useState(false);
+  // Which in-game display style the export string requests -- "table"
+  // (the default) matches the addon's original readout placement.
+  const [displayMode, setDisplayMode] = useState<DisplayMode>("table");
   const [logsWeight, setLogsWeight] = useState(50);
   const [ioWeight, setIoWeight] = useState(50);
 
@@ -237,9 +249,21 @@ export default function LookupForm() {
       }
       const names = entries.map((e) => e.key);
       const blizzardScoreByKey = new Map(entries.map((e) => [e.key, e.blizzardScore]));
+      const blizzardItemLevelByKey = new Map(entries.map((e) => [e.key, e.blizzardItemLevel]));
 
       let finalResults = await runLookup(names, creds.clientId, creds.clientSecret);
-      finalResults = finalResults.map((r) => ({ ...r, blizzardScore: blizzardScoreByKey.get(r.key) ?? 0 }));
+      finalResults = finalResults.map((r) => {
+        const blizzardItemLevel = blizzardItemLevelByKey.get(r.key) ?? 0;
+        return {
+          ...r,
+          blizzardScore: blizzardScoreByKey.get(r.key) ?? 0,
+          blizzardItemLevel,
+          // Default the visible iLvl slot to Blizzard's own value right
+          // away -- fetchRioScores (below, only when raider.io is actually
+          // used) overwrites it with raider.io's own itemLevel later.
+          itemLevel: blizzardItemLevel,
+        };
+      });
 
       // Lazy-loading raider.io (see the effect above) is only for turning
       // Filter on AFTER an already-finished lookup. If Filter is already on
@@ -278,7 +302,7 @@ export default function LookupForm() {
         filterEnabled ? logsWeight : 100,
         filterEnabled ? ioWeight : 0
       );
-      await navigator.clipboard.writeText(toExportString(rankedResults));
+      await navigator.clipboard.writeText(toExportString(rankedResults, displayMode));
 
       setButtonState("done");
       setTimeout(() => setButtonState("idle"), 1800);
@@ -416,14 +440,12 @@ export default function LookupForm() {
         <p style={{ color: "#ff6b6b", marginTop: 12, fontSize: 13 }}>{errorMessage}</p>
       )}
 
-      {/* Preview, Filter and RaiderIO are independent toggles, all peers of
-          each other: Preview alone just shows the table (Name + WCL Log%).
-          Filter alone reveals the weight sliders and switches the table to
-          Rank order, using Blizzard's own in-game rating (free, no
-          request) as the Score source by default. RaiderIO only matters
-          once Filter is also on -- it swaps that default for an actual
-          raider.io lookup instead. */}
-      <div style={{ display: "flex", gap: 20, marginTop: 22, alignSelf: "flex-start" }}>
+      {/* Preview and Filter are independent toggles, peers of each other:
+          Preview alone just shows the table (Name + WCL Log%). Filter alone
+          reveals the weight sliders and switches the table to Rank order,
+          using Blizzard's own in-game rating (free, no request) as the
+          Score source by default. */}
+      <div style={{ display: "flex", gap: 20, marginTop: 22 }}>
         <label className="qa-toggle">
           <input type="checkbox" checked={previewEnabled} onChange={(e) => setPreviewEnabled(e.target.checked)} />
           <span className="qa-toggle-track" />
@@ -435,11 +457,35 @@ export default function LookupForm() {
           <span className="qa-toggle-track" />
           <span className="qa-toggle-label">Filter</span>
         </label>
+      </div>
 
-        <label className="qa-toggle">
+      {/* Blizzard vs RaiderIO -- which source feeds the Score slot once
+          Filter is on. Unchecked (left/default) = Blizzard's own in-game
+          rating, already in the export, no network request. Checked
+          (right) = an actual raider.io lookup. */}
+      <div style={{ marginTop: 14 }}>
+        <label className="qa-toggle qa-toggle-2way">
+          <span className="qa-toggle-label">Blizzard Score</span>
           <input type="checkbox" checked={raiderIoEnabled} onChange={(e) => setRaiderIoEnabled(e.target.checked)} />
           <span className="qa-toggle-track" />
-          <span className="qa-toggle-label">RaiderIO</span>
+          <span className="qa-toggle-label">RaiderIO Score</span>
+        </label>
+      </div>
+
+      {/* Table vs Name -- which in-game display style the export string
+          requests (see Core.lua's QueueAnalyzerDisplayMode), mutually
+          exclusive. Unchecked (left/default) = the role icon/iLvl/Rating
+          readouts. Checked (right) = the Name prefix instead. */}
+      <div style={{ marginTop: 10 }}>
+        <label className="qa-toggle qa-toggle-2way">
+          <span className="qa-toggle-label">Import to Table</span>
+          <input
+            type="checkbox"
+            checked={displayMode === "name"}
+            onChange={(e) => setDisplayMode(e.target.checked ? "name" : "table")}
+          />
+          <span className="qa-toggle-track" />
+          <span className="qa-toggle-label">Import to Name</span>
         </label>
       </div>
 
@@ -480,6 +526,7 @@ export default function LookupForm() {
             <tr>
               <th style={{ textAlign: "right", width: "1%", whiteSpace: "nowrap" }}>Rank</th>
               <th style={{ textAlign: "left" }}>Name</th>
+              <th>iLvl</th>
               <th>LOG</th>
               {filterEnabled && <th>Score</th>}
             </tr>
@@ -499,6 +546,9 @@ export default function LookupForm() {
                   >
                     {r.name}
                   </a>
+                </td>
+                <td style={{ color: r.itemLevel > 0 ? "#ddd" : undefined, fontWeight: 700 }}>
+                  {r.itemLevel > 0 ? Math.round(r.itemLevel) : "-"}
                 </td>
                 <td style={{ color: r.error ? undefined : percentileColor(r.best), fontWeight: 700 }}>
                   {r.error ? "-" : Math.round(r.best)}
@@ -546,6 +596,9 @@ export default function LookupForm() {
             cursor: "pointer",
             padding: 0,
             justifySelf: "end",
+            // 10% of the column's own width, not the whole card -- keeps it
+            // just off the card's right edge instead of flush against it.
+            marginRight: "10%",
           }}
         >
           Clear

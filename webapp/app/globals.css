@@ -94,6 +94,13 @@
   color: #e8e8e8;
 }
 
+/* Two-way variant (Blizzard/RaiderIO, Table/Name): a label on each side of
+   the same track, instead of one label + on/off -- same track/thumb visuals
+   as the plain toggle. Both labels stay the same active color regardless of
+   which side is selected (the track/thumb position alone shows that) --
+   dimming the unselected side read as confusing/half-disabled rather than
+   as a simple either/or choice. */
+
 /* Range sliders, flat/modern style instead of the OS default. */
 .qa-slider {
   -webkit-appearance: none;

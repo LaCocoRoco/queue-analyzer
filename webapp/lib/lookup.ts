@@ -58,6 +58,12 @@ export interface LookupResult {
   // used as the fast, no-network default for the "IO" ranking slot when
   // the RaiderIO toggle is off, see LookupForm.tsx.
   blizzardScore: number;
+  // Blizzard's own item level (member.ItemLevel, same call as dungeonScore
+  // above -- see Core.lua's GetApplicantNames), sent by the addon alongside
+  // every export. Used as the fast, no-network default for the iLvl table
+  // column when raider.io hasn't been fetched (its own itemLevel takes over
+  // once fetchRioScores has run, same handoff as blizzardScore/ioScore).
+  blizzardItemLevel: number;
   error?: string;
 }
 
@@ -72,21 +78,27 @@ function parseNameRealm(line: string): { name: string; realm: string } | null {
   return { name: line.slice(0, idx), realm: line.slice(idx + 1) };
 }
 
-// The addon exports "Name-Realm:Rating:Name-Realm:Rating:..." (see
-// Core.lua's GetApplicantNames) -- fixed alternating pairs, Blizzard's own
-// in-game Mythic+ rating right after each name. Splits the raw clipboard
-// text and pairs tokens up two at a time rather than relying on
-// parseNameRealm's "-" heuristic per token, since a bare rating number
+// The addon exports "Name-Realm:Rating:ItemLevel:Name-Realm:Rating:ItemLevel:..."
+// (see Core.lua's GetApplicantNames) -- fixed triplets, Blizzard's own
+// in-game Mythic+ rating and item level right after each name. Splits the
+// raw clipboard text and groups tokens up three at a time rather than
+// relying on parseNameRealm's "-" heuristic per token, since a bare number
 // wouldn't contain one anyway and would just get silently dropped.
-export function parseClipboardEntries(rawText: string): { key: string; blizzardScore: number }[] {
+export function parseClipboardEntries(
+  rawText: string
+): { key: string; blizzardScore: number; blizzardItemLevel: number }[] {
   const tokens = rawText
     .split(/[:\n]/)
     .map((l) => l.trim())
     .filter(Boolean);
 
-  const entries: { key: string; blizzardScore: number }[] = [];
-  for (let i = 0; i + 1 < tokens.length; i += 2) {
-    entries.push({ key: tokens[i], blizzardScore: Number(tokens[i + 1]) || 0 });
+  const entries: { key: string; blizzardScore: number; blizzardItemLevel: number }[] = [];
+  for (let i = 0; i + 2 < tokens.length; i += 3) {
+    entries.push({
+      key: tokens[i],
+      blizzardScore: Number(tokens[i + 1]) || 0,
+      blizzardItemLevel: Number(tokens[i + 2]) || 0,
+    });
   }
   return entries;
 }
@@ -114,6 +126,7 @@ async function lookupOne(name: string, realm: string, clientId: string, clientSe
       ioScore: 0,
       ioColor: NO_IO_COLOR,
       blizzardScore: 0,
+      blizzardItemLevel: 0,
       itemLevel: 0,
       error: (err as Error).message,
     };
@@ -137,6 +150,7 @@ async function lookupOne(name: string, realm: string, clientId: string, clientSe
       ioScore: 0,
       ioColor: NO_IO_COLOR,
       blizzardScore: 0,
+      blizzardItemLevel: 0,
       itemLevel: 0,
     };
   }
@@ -154,6 +168,7 @@ async function lookupOne(name: string, realm: string, clientId: string, clientSe
     ioScore: 0,
     ioColor: NO_IO_COLOR,
     blizzardScore: 0,
+    blizzardItemLevel: 0,
     itemLevel: 0,
   };
 }
@@ -165,7 +180,16 @@ async function lookupOne(name: string, realm: string, clientId: string, clientSe
 export async function fetchRioScores(results: LookupResult[], region: string): Promise<LookupResult[]> {
   return mapWithConcurrency(results, CONCURRENCY, async (r) => {
     const rio = await getRioProfile(r.name, toServerSlug(r.realm), region);
-    return { ...r, ioScore: rio?.score ?? 0, ioColor: rio?.color ?? NO_IO_COLOR, itemLevel: rio?.itemLevel ?? 0 };
+    // Falls back to Blizzard's own item level (already sitting in
+    // r.itemLevel from the addon export) rather than 0 when raider.io has
+    // no profile for this character -- a missing raider.io lookup shouldn't
+    // blank out a value we already have.
+    return {
+      ...r,
+      ioScore: rio?.score ?? 0,
+      ioColor: rio?.color ?? NO_IO_COLOR,
+      itemLevel: rio?.itemLevel ?? r.itemLevel,
+    };
   });
 }
 
