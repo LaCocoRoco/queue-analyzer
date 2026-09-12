@@ -2,12 +2,25 @@
 # only on a pushed tag (e.g. `git tag v0.3.0 && git push --tags`), never on
 # regular commits, so day-to-day pushes don't spam CurseForge with releases.
 #
-# Uses BigWigsMods/packager (the standard WoW addon release tool -- used by
-# most CurseForge addons). It reads the CurseForge project ID from the
-# addon's own QueueAnalyzer.toc ("## X-Curse-Project-ID: 1692771"), and
-# authenticates via the CF_API_TOKEN environment variable -- mapped here
-# from the CF_API_KEY repo secret (that's just the secret's NAME; the value
-# is the same CurseForge API token either way).
+# Uses BigWigsMods/packager's release.sh (the standard WoW addon release
+# tool -- used by most CurseForge addons) directly via `run:`, rather than
+# its `uses: BigWigsMods/packager@v2` wrapper -- that wrapper has no way to
+# point at a subdirectory (its only inputs are `args` and `pandoc`, and
+# `working-directory` isn't valid on a `uses:` step at all: confirmed live,
+# GitHub rejects the whole workflow file with a schema error, not a runtime
+# one). release.sh's own `-t topdir` flag is for the git ROOT, not the
+# addon's own folder (also confirmed live: pointing it at the addon
+# subdirectory fails with "No Git, SVN, or Hg checkout found", since that
+# folder has no .git of its own) -- the documented fix is to just run the
+# script from within the repo (any subdirectory), which is exactly what a
+# `run:` step's own `working-directory` gives us: release.sh's built-in
+# auto-detection then walks up from there to find the real .git.
+#
+# Reads the CurseForge project ID from the addon's own QueueAnalyzer.toc
+# ("## X-Curse-Project-ID: 1692771"). Authenticates via the CF_API_TOKEN
+# environment variable release.sh itself reads -- mapped here from the
+# CF_API_KEY repo secret (that's just the secret's NAME; the value is the
+# same CurseForge API token either way).
 name: Release Addon to CurseForge
 
 on:
@@ -24,14 +37,14 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Package and release
-        uses: BigWigsMods/packager@v2
+      - name: Checkout packager
+        uses: actions/checkout@v4
         with:
-          # working-directory: isn't a valid property on a `uses:` step at
-          # all (confirmed live -- GitHub rejects the whole workflow file
-          # with a schema error, not a runtime one) -- release.sh has its
-          # own -t flag for exactly this (a monorepo where the addon isn't
-          # at the repo root).
-          args: -t addon/QueueAnalyzer
+          repository: BigWigsMods/packager
+          path: .packager
+
+      - name: Package and release
+        working-directory: addon/QueueAnalyzer
+        run: bash "$GITHUB_WORKSPACE/.packager/release.sh"
         env:
           CF_API_TOKEN: ${{ secrets.CF_API_KEY }}
