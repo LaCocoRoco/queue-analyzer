@@ -97,19 +97,33 @@ QueueAnalyzerDisplayMode = "table"
 ---Parse the webapp's flat ":"-delimited import string into a lookup table
 ---plus the requested display mode (see LookupForm.tsx's toExportString).
 ---An optional leading "TABLE" or "NAME" token selects the mode; everything
----after it is the usual "Name-Realm:Best:Rank" triplets. Safe to split the
----whole string on ":" since names/realms never contain one; rank is 0, not
----omitted, when the webapp had no rank for an entry, so the triplet stride
----never has to guess.
+---after it (up to the trailing "IMPORT" marker) is the usual
+---"Name-Realm:Best:Rank" triplets. Safe to split the whole string on ":"
+---since names/realms never contain one; rank is 0, not omitted, when the
+---webapp had no rank for an entry, so the triplet stride never has to
+---guess.
+---
+---Requires the string to END in "IMPORT" (see toExportString on the webapp
+---side) -- this addon's OWN Export string ends in "EXPORT" instead and is
+---otherwise the same shape (leading token + "Name-Realm:number:number"
+---triplets), so without this check, pasting the Export field's own content
+---back into Import here used to get silently accepted as if it were real
+---ranked results, reading Rating/ItemLevel as Best/Rank. Returns nil data
+---and an error message instead in that case (or if the string is empty/
+---junk), rather than guessing.
 ---@param text string
----@return table<string, {best: number, rank: number}>, string
+---@return table<string, {best: number, rank: number}>|nil, string|nil, string|nil errorMessage
 local function ParseImportText(text)
-	local data = {}
 	local clean = text:gsub("%s", "") -- strip any incidental whitespace/newlines from pasting
 	local tokens = {}
 	for token in clean:gmatch("[^:]+") do
 		table.insert(tokens, token)
 	end
+
+	if #tokens == 0 or tokens[#tokens] ~= "IMPORT" then
+		return nil, nil, "Not an Import result (paste the webapp's output, not the Export field)."
+	end
+	table.remove(tokens) -- drop the trailing marker, not part of the data itself
 
 	local mode = "table"
 	local startIdx = 1
@@ -118,6 +132,7 @@ local function ParseImportText(text)
 		startIdx = 2
 	end
 
+	local data = {}
 	for i = startIdx, #tokens - 2, 3 do
 		local key = tokens[i]
 		local best = tonumber(tokens[i + 1])
@@ -126,7 +141,7 @@ local function ParseImportText(text)
 			data[key] = { best = best, rank = rank }
 		end
 	end
-	return data, mode
+	return data, mode, nil
 end
 
 -- Percentile color tiers, matching the webapp's percentileColor() exactly
@@ -246,6 +261,13 @@ local function CreateQueueAnalyzerFrame()
 		f:SetPoint("CENTER")
 	end
 	tinsert(UISpecialFrames, "QueueAnalyzerFrame") -- Escape closes it
+	-- Raised above RaiderIO's own overlay panel -- both sit in the same
+	-- screen area (see the docking comment above) and RaiderIO's panel was
+	-- winning the default draw order, partially covering our title bar/
+	-- Export row. "HIGH" plus SetToplevel (raises within its own strata on
+	-- creation/show) reliably wins over RaiderIO's more standard strata.
+	f:SetFrameStrata("HIGH")
+	f:SetToplevel(true)
 
 	f.title = f:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
 	f.title:SetPoint("LEFT", f.TitleBg, "LEFT", 5, 0)
@@ -295,7 +317,11 @@ local function CreateQueueAnalyzerFrame()
 	importButton:SetSize(74, 22)
 	importButton:SetPoint("LEFT", importBox, "RIGHT", 8, 0)
 	importButton:SetScript("OnClick", function()
-		local data, mode = ParseImportText(f.importBox:GetText())
+		local data, mode, errorMessage = ParseImportText(f.importBox:GetText())
+		if errorMessage then
+			f.status:SetText(errorMessage)
+			return
+		end
 		local count = 0
 		for _ in pairs(data) do
 			count = count + 1
@@ -323,7 +349,7 @@ function QueueAnalyzer_RefreshExport()
 	local entries = GetApplicantNames()
 	local dungeonName = GetCurrentDungeonName() or ""
 
-	-- One flat ":"-delimited string ("DungeonName:Name-Realm:Rating:ItemLevel:...")
+	-- One flat ":"-delimited string ("DungeonName:Name-Realm:Rating:ItemLevel:...:EXPORT")
 	-- instead of separate lines -- easier to select/copy reliably as a
 	-- single line, and the webapp reads it back the same way (splits on
 	-- ":"; names/realms/dungeon names never contain ":"). The dungeon name
@@ -336,9 +362,17 @@ function QueueAnalyzer_RefreshExport()
 	-- string). But truly empty (no dungeon AND no applicants) stays a
 	-- genuinely empty string, not a stray lone ":" -- that showed up in the
 	-- Export field on every addon startup before any listing existed.
+	--
+	-- The trailing "EXPORT" token is a self-identifying marker: this
+	-- string's own shape ("stuff:Name-Realm:number:number:...") is close
+	-- enough to the webapp's Import string's shape that pasting THIS
+	-- straight back into the Import box below used to get silently
+	-- "parsed" as if it were real ranked results (confirmed live -- rating/
+	-- item level got read as best/rank). ParseImportText now refuses
+	-- anything that doesn't end in "IMPORT" instead of guessing.
 	local text = ""
 	if dungeonName ~= "" or #entries > 0 then
-		text = dungeonName .. ":" .. table.concat(entries, ":")
+		text = dungeonName .. ":" .. table.concat(entries, ":") .. ":EXPORT"
 	end
 
 	frame.exportBox:SetText(text)
@@ -434,9 +468,10 @@ local function HookApplicantTooltip()
 		local data = GetImportedData(name, realm)
 		if data and GameTooltip:IsOwned(self) then
 			GameTooltip:AddLine(" ")
-			-- Whole numbers only -- the webapp now exports Best rounded, no
-			-- decimals, so "%d" (not "%.1f") avoids a stray ".0" suffix.
-			GameTooltip:AddLine("Queue Analyzer Best: " .. PercentileColorCode(data.best) .. string.format("%d", data.best) .. "|r")
+			-- Whole numbers only, zero-padded to 2 digits (matching the
+			-- in-game readouts and the webapp's own LOG column) -- the
+			-- webapp now exports Best rounded, no decimals.
+			GameTooltip:AddLine("Queue Analyzer Best: " .. PercentileColorCode(data.best) .. string.format("%02d", data.best) .. "|r")
 			GameTooltip:Show()
 		end
 	end)
@@ -485,9 +520,9 @@ local function HookApplicantNamePrefix()
 
 		local prefix
 		if data.rank > 0 then
-			prefix = string.format("%02d:%d:", data.rank, data.best)
+			prefix = string.format("%02d:%02d:", data.rank, data.best)
 		else
-			prefix = string.format("%d:", data.best)
+			prefix = string.format("%02d:", data.best)
 		end
 
 		member.Name:SetText(PercentileColorCode(data.best) .. prefix .. "|r" .. displayName)
@@ -514,18 +549,36 @@ local function AddApplicationViewerButton()
 	panel.QueueAnalyzerButton = button
 end
 
--- "Table" mode: two small readouts anchored next to the iLvl and Rating
--- columns -- the alternative to the name-prefix approach above
--- (HookApplicantNamePrefix), never both at once (see QueueAnalyzerDisplayMode,
--- set from the webapp's Table/Name toggle). Deliberately no header label
--- and the smallest available font: LFGListFrame can't be resized (both
--- corners are anchored, so SetWidth is a no-op -- confirmed live), so this
--- has zero room to spare.
---   1. After iLvl: rank, anchored to member.ItemLevel.
---   2. After Rating: log, anchored to member.Rating the same way. No longer
---      anything next to the role icon -- that spot was too cramped once
---      applicants show 2-3 role icons, and iLvl/Rating already cover
---      rank+log between them.
+-- Star icon for a top-5 rank, squeezed into the Role column's own leftover
+-- space after whichever role icon is actually the rightmost visible one
+-- (applicants show 1-3 icons depending on which roles they're flexible
+-- for) -- anchored to that icon instead of a fixed x-offset so it adapts
+-- automatically instead of assuming a fixed icon count. A texture escape
+-- (|T...|t) inside the FontString, not a Unicode "★" character -- WoW's UI
+-- font doesn't reliably have that glyph, but any FontString can render an
+-- arbitrary texture inline like this regardless of font.
+local STAR_ICON = "|TInterface\\Common\\FavoritesIcon:14:14|t"
+
+local function GetLastRoleIcon(member)
+	if member.RoleIcon3:IsShown() then
+		return member.RoleIcon3
+	end
+	if member.RoleIcon2:IsShown() then
+		return member.RoleIcon2
+	end
+	return member.RoleIcon1
+end
+
+-- "Table" mode: three small readouts -- the alternative to the name-prefix
+-- approach above (HookApplicantNamePrefix), never both at once (see
+-- QueueAnalyzerDisplayMode, set from the webapp's Table/Name toggle).
+-- Deliberately no header label and the smallest available font: LFGListFrame
+-- can't be resized (both corners are anchored, so SetWidth is a no-op --
+-- confirmed live), so this has zero room to spare.
+--   1. After the last role icon: stars for the top 5 ranks -- 5 stars for
+--      #1 down to 1 star for #5, none past that.
+--   2. After iLvl: rank, anchored to member.ItemLevel.
+--   3. After Rating: log, anchored to member.Rating the same way.
 local hookedApplicantReadouts = false
 local function HookApplicantReadouts()
 	if hookedApplicantReadouts or not LFGListApplicationViewer_UpdateApplicantMember then
@@ -548,6 +601,9 @@ local function HookApplicantReadouts()
 		-- earlier this session) rather than leaving stale numbers up.
 		local data = QueueAnalyzerDisplayMode == "table" and GetImportedData(name, realm) or nil
 
+		if not member.QueueAnalyzerStarReadout then
+			member.QueueAnalyzerStarReadout = member:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+		end
 		if not member.QueueAnalyzerIlvlReadout then
 			member.QueueAnalyzerIlvlReadout = member:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
 		end
@@ -556,10 +612,19 @@ local function HookApplicantReadouts()
 		end
 
 		if not data then
+			member.QueueAnalyzerStarReadout:SetText("")
 			member.QueueAnalyzerIlvlReadout:SetText("")
 			member.QueueAnalyzerRatingReadout:SetText("")
 			return
 		end
+
+		-- Re-anchored every update (not just on creation) since which role
+		-- icon is the rightmost visible one can change between applicants.
+		member.QueueAnalyzerStarReadout:ClearAllPoints()
+		member.QueueAnalyzerStarReadout:SetPoint("LEFT", GetLastRoleIcon(member), "RIGHT", 2, 0)
+		-- Rank 1 -> 5 stars, rank 2 -> 4, ... rank 5 -> 1, nothing past that.
+		local starCount = (data.rank >= 1 and data.rank <= 5) and (6 - data.rank) or 0
+		member.QueueAnalyzerStarReadout:SetText(STAR_ICON:rep(starCount))
 
 		member.QueueAnalyzerIlvlReadout:ClearAllPoints()
 		member.QueueAnalyzerIlvlReadout:SetPoint("LEFT", member.ItemLevel, "RIGHT", 2, 0)
@@ -568,7 +633,7 @@ local function HookApplicantReadouts()
 
 		member.QueueAnalyzerRatingReadout:ClearAllPoints()
 		member.QueueAnalyzerRatingReadout:SetPoint("LEFT", member.Rating, "RIGHT", 2, 0)
-		member.QueueAnalyzerRatingReadout:SetText(PercentileColorCode(data.best) .. data.best .. "|r")
+		member.QueueAnalyzerRatingReadout:SetText(PercentileColorCode(data.best) .. string.format("%02d", data.best) .. "|r")
 	end)
 end
 

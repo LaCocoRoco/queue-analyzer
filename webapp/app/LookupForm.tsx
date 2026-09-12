@@ -15,8 +15,8 @@ import {
 } from "@/lib/lookup";
 import { toServerSlug, validateCredentials } from "@/lib/wcl";
 
-// Flat ":"-delimited "MODE:Name-Realm:Best:Rank:Name-Realm:Best:Rank:..." --
-// the format the addon's import window parses (see Core.lua's
+// Flat ":"-delimited "MODE:Name-Realm:Best:Rank:Name-Realm:Best:Rank:...:IMPORT"
+// -- the format the addon's import window parses (see Core.lua's
 // ParseImportText). A single line pastes far more reliably into WoW's
 // EditBox than a multi-line block. Safe because names/realms never contain
 // ":". Best is rounded to a whole number -- no decimals in anything that
@@ -25,13 +25,17 @@ import { toServerSlug, validateCredentials } from "@/lib/wcl";
 // just 0 when Filter wasn't used for this export, which the addon reads as
 // "no rank to show". The leading MODE token ("TABLE" or "NAME") tells the
 // addon which of its two mutually-exclusive display styles to use -- see
-// the Table/Name toggle below.
+// the Table/Name toggle below. The trailing "IMPORT" marker lets the
+// addon's ParseImportText tell this string apart from its OWN Export
+// string (which is a similar enough shape -- "stuff:Name-Realm:number:
+// number:...EXPORT" -- that pasting one into the other used to get
+// silently misread as real data instead of rejected).
 function toExportString(results: RankedResult[], displayMode: DisplayMode): string {
   const mode = displayMode === "name" ? "NAME" : "TABLE";
   const triplets = results
     .filter((r) => !r.error)
     .flatMap((r) => [r.key, Math.round(r.best).toString(), r.rank.toString()]);
-  return [mode, ...triplets].join(":");
+  return [mode, ...triplets, "IMPORT"].join(":");
 }
 
 // Standard WoW class colors (RAID_CLASS_COLORS), keyed by Blizzard's
@@ -634,7 +638,7 @@ export default function LookupForm() {
                   {r.itemLevel > 0 ? Math.round(r.itemLevel) : "-"}
                 </td>
                 <td style={{ color: r.error ? undefined : percentileColor(r.best), fontWeight: 700 }}>
-                  {r.error ? "-" : Math.round(r.best)}
+                  {r.error ? "-" : String(Math.round(r.best)).padStart(2, "0")}
                 </td>
                 {filterEnabled && (
                   <td style={{ color: showIoColumn && r.ioScore > 0 ? r.ioColor : undefined, fontWeight: 700 }}>

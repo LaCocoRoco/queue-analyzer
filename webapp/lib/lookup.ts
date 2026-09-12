@@ -101,22 +101,37 @@ export function parseClipboardEntries(
   return entries;
 }
 
-// The addon actually prepends one more field ahead of the triplets above:
-// "DungeonName:Name-Realm:Rating:ItemLevel:..." -- the current Mythic
-// Keystone dungeon for the leader's own Group Finder listing (see Core.lua's
-// GetCurrentDungeonName), used for the webapp's Season/Dungeon toggle. Always
-// present as a field even when empty (no active Keystone listing), so the
-// split here is on just the FIRST colon rather than reusing
-// parseClipboardEntries' filter(Boolean) split, which would silently drop an
-// empty leading field and misalign every triplet after it.
+// The addon actually prepends one more field ahead of the triplets above,
+// and appends one after: "DungeonName:Name-Realm:Rating:ItemLevel:...:EXPORT".
+// DungeonName is the current Mythic Keystone dungeon for the leader's own
+// Group Finder listing (see Core.lua's GetCurrentDungeonName), used for the
+// webapp's Season/Dungeon toggle -- always present as a field even when
+// empty (no active Keystone listing), so the split here is on just the
+// FIRST colon rather than reusing parseClipboardEntries' filter(Boolean)
+// split, which would silently drop an empty leading field and misalign
+// every triplet after it. The trailing "EXPORT" marker is what this
+// function itself writes back as "IMPORT" instead (see toExportString) --
+// the two formats are otherwise similar enough in shape that pasting the
+// Export field straight back into itself used to get silently accepted as
+// real ranked data (Rating/ItemLevel read as Best/Rank). An empty clipboard
+// (nothing copied yet) is not an error here -- runLookup's caller already
+// surfaces "no names" for that; this only rejects non-empty text that isn't
+// actually the addon's Export output.
 export function parseClipboardText(rawText: string): {
   dungeonName: string | null;
   entries: { key: string; blizzardScore: number; blizzardItemLevel: number }[];
 } {
   const trimmed = rawText.trim();
-  const firstColon = trimmed.indexOf(":");
-  const dungeonPart = firstColon >= 0 ? trimmed.slice(0, firstColon) : "";
-  const rest = firstColon >= 0 ? trimmed.slice(firstColon + 1) : "";
+  if (trimmed === "") {
+    return { dungeonName: null, entries: [] };
+  }
+  if (!trimmed.endsWith(":EXPORT")) {
+    throw new Error("Clipboard doesn't look like the addon's Export field (Import result pasted by mistake?).");
+  }
+  const withoutMarker = trimmed.slice(0, -":EXPORT".length);
+  const firstColon = withoutMarker.indexOf(":");
+  const dungeonPart = firstColon >= 0 ? withoutMarker.slice(0, firstColon) : "";
+  const rest = firstColon >= 0 ? withoutMarker.slice(firstColon + 1) : "";
   return {
     dungeonName: dungeonPart.trim() || null,
     entries: parseClipboardEntries(rest),
