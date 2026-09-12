@@ -3,18 +3,21 @@
 # regular commits, so day-to-day pushes don't spam CurseForge with releases.
 #
 # Uses BigWigsMods/packager's release.sh (the standard WoW addon release
-# tool -- used by most CurseForge addons) directly via `run:`, rather than
-# its `uses: BigWigsMods/packager@v2` wrapper -- that wrapper has no way to
-# point at a subdirectory (its only inputs are `args` and `pandoc`, and
-# `working-directory` isn't valid on a `uses:` step at all: confirmed live,
-# GitHub rejects the whole workflow file with a schema error, not a runtime
-# one). release.sh's own `-t topdir` flag is for the git ROOT, not the
-# addon's own folder (also confirmed live: pointing it at the addon
-# subdirectory fails with "No Git, SVN, or Hg checkout found", since that
-# folder has no .git of its own) -- the documented fix is to just run the
-# script from within the repo (any subdirectory), which is exactly what a
-# `run:` step's own `working-directory` gives us: release.sh's built-in
-# auto-detection then walks up from there to find the real .git.
+# tool -- used by most CurseForge addons) directly via `run:`. It has a hard
+# design assumption (confirmed live, two different failures): $topdir must
+# be BOTH the addon's own folder (it looks for *.toc directly inside it) AND
+# a real git checkout root (`-d "$topdir/.git"`, a literal directory check,
+# not just "somewhere inside a repo"). In this monorepo those are two
+# different places -- addon/QueueAnalyzer has no .git of its own, and the
+# actual repo root has no .toc. There's no flag to decouple the two.
+#
+# The fix: copy just the addon folder into its own fresh, throwaway git
+# repo (a real `git init` + commit, so both of release.sh's checks pass
+# against that one self-contained directory), and run release.sh there
+# instead of against the real checkout. The synthetic one-commit history is
+# fine -- we don't rely on this tool's git-log-based changelog, and the
+# addon's own version comes from QueueAnalyzer.toc's ## Version line either
+# way.
 #
 # Reads the CurseForge project ID from the addon's own QueueAnalyzer.toc
 # ("## X-Curse-Project-ID: 1692771"). Authenticates via the CF_API_TOKEN
@@ -34,8 +37,15 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+
+      - name: Prepare standalone addon checkout
+        run: |
+          mkdir -p /tmp/qa-release/QueueAnalyzer
+          cp -r addon/QueueAnalyzer/. /tmp/qa-release/QueueAnalyzer/
+          cd /tmp/qa-release/QueueAnalyzer
+          git init -q
+          git add -A
+          git -c user.email=ci@localhost -c user.name=ci commit -q -m "release"
 
       - name: Checkout packager
         uses: actions/checkout@v4
@@ -44,7 +54,7 @@ jobs:
           path: .packager
 
       - name: Package and release
-        working-directory: addon/QueueAnalyzer
+        working-directory: /tmp/qa-release/QueueAnalyzer
         run: bash "$GITHUB_WORKSPACE/.packager/release.sh"
         env:
           CF_API_TOKEN: ${{ secrets.CF_API_KEY }}
