@@ -16,16 +16,16 @@
 BINDING_HEADER_QUEUEANALYZER = "Queue Analyzer"
 BINDING_NAME_QUEUEANALYZER_TOGGLE = "Show/export applicant names"
 
----Collect "Name-Realm" and Blizzard's own Mythic+ rating for every member
----of every current applicant, as alternating entries (Name-Realm, then its
----rating, repeating) -- C_LFGList.GetApplicantMemberInfo already returns
----dungeonScore (Blizzard's own in-game Mythic+ rating, the same number
----shown in the "Rating" column) in the very same call we use for the name,
----at zero extra cost -- no separate request, no network round trip. This
----is a DIFFERENT number from raider.io's own score (two independently
----calculated ratings that happen to correlate closely, not the same
----value) -- the webapp uses it as a fast default and only calls raider.io
----itself if you explicitly ask it to.
+---Collect "Name-Realm", Blizzard's own Mythic+ rating and item level for
+---every member of every current applicant, as flat triplets (Name-Realm,
+---rating, item level, repeating) -- C_LFGList.GetApplicantMemberInfo already
+---returns dungeonScore (Blizzard's own in-game Mythic+ rating, the same
+---number shown in the "Rating" column) and itemLevel in the very same call
+---we use for the name, at zero extra cost -- no separate request, no
+---network round trip. dungeonScore is a DIFFERENT number from raider.io's
+---own score (two independently calculated ratings that happen to correlate
+---closely, not the same value) -- the webapp uses it as a fast default and
+---only calls raider.io itself if you explicitly ask it to.
 ---@return string[] entries
 local function GetApplicantNames()
 	local entries = {}
@@ -38,7 +38,7 @@ local function GetApplicantNames()
 		local info = C_LFGList.GetApplicantInfo(applicantID)
 		if info then
 			for memberIdx = 1, info.numMembers do
-				local fullName, _, _, _, _, _, _, _, _, _, _, dungeonScore =
+				local fullName, _, _, _, itemLevel, _, _, _, _, _, _, dungeonScore =
 					C_LFGList.GetApplicantMemberInfo(applicantID, memberIdx)
 				if fullName then
 					local name, realm = strsplit("-", fullName)
@@ -47,6 +47,7 @@ local function GetApplicantNames()
 					end
 					table.insert(entries, name .. "-" .. realm)
 					table.insert(entries, tostring(math.floor((dungeonScore or 0) + 0.5)))
+					table.insert(entries, tostring(math.floor((itemLevel or 0) + 0.5)))
 				end
 			end
 		end
@@ -63,13 +64,24 @@ end
 -- always re-read live.
 QueueAnalyzerImportedData = {}
 
----Parse the webapp's flat ":"-delimited "Name-Realm:Best:Rank:Name-Realm:Best:Rank:..."
----string (see LookupForm.tsx's toExportString) into a lookup table. Safe to
----split the whole string on ":" since names/realms never contain one. Always
----triplets -- rank is 0, not omitted, when the webapp had no rank for an
----entry, so the stride here never has to guess.
+-- Which of the two in-game display styles is active -- set from the leading
+-- mode token in the webapp's import string (see ParseImportText), driven by
+-- the webapp's Table/Name toggle. "table" shows the readouts anchored next
+-- to the role icon/iLvl/Rating columns (HookApplicantReadouts); "name"
+-- prefixes the applicant's Name itself (HookApplicantNamePrefix) -- always
+-- exactly one of the two, never both. Defaults to "table" until the first
+-- import of a session.
+QueueAnalyzerDisplayMode = "table"
+
+---Parse the webapp's flat ":"-delimited import string into a lookup table
+---plus the requested display mode (see LookupForm.tsx's toExportString).
+---An optional leading "TABLE" or "NAME" token selects the mode; everything
+---after it is the usual "Name-Realm:Best:Rank" triplets. Safe to split the
+---whole string on ":" since names/realms never contain one; rank is 0, not
+---omitted, when the webapp had no rank for an entry, so the triplet stride
+---never has to guess.
 ---@param text string
----@return table<string, {best: number, rank: number}>
+---@return table<string, {best: number, rank: number}>, string
 local function ParseImportText(text)
 	local data = {}
 	local clean = text:gsub("%s", "") -- strip any incidental whitespace/newlines from pasting
@@ -77,7 +89,15 @@ local function ParseImportText(text)
 	for token in clean:gmatch("[^:]+") do
 		table.insert(tokens, token)
 	end
-	for i = 1, #tokens - 2, 3 do
+
+	local mode = "table"
+	local startIdx = 1
+	if tokens[1] == "TABLE" or tokens[1] == "NAME" then
+		mode = tokens[1]:lower()
+		startIdx = 2
+	end
+
+	for i = startIdx, #tokens - 2, 3 do
 		local key = tokens[i]
 		local best = tonumber(tokens[i + 1])
 		local rank = tonumber(tokens[i + 2])
@@ -85,7 +105,7 @@ local function ParseImportText(text)
 			data[key] = { best = best, rank = rank }
 		end
 	end
-	return data
+	return data, mode
 end
 
 -- Percentile color tiers, matching the webapp's percentileColor() exactly
@@ -141,31 +161,35 @@ local frame
 -- made it fiddly to know where to click to select everything.
 local function CreateQueueAnalyzerFrame()
 	local f = CreateFrame("Frame", "QueueAnalyzerFrame", UIParent, "BasicFrameTemplateWithInset")
-	f:SetSize(380, 160)
-	-- Docked to the Group Finder window's bottom-right corner instead of
-	-- popping up center-screen -- RaiderIO's own overlay panel sits to the
-	-- right near the TOP of LFGListFrame, so anchoring low/right here should
-	-- clear it. LFGListFrame might not exist yet if this is the very first
-	-- time the addon's own window is opened (Blizzard_GroupFinder is
-	-- load-on-demand) -- falls back to screen-center in that case. Still
-	-- freely draggable afterwards (SetClampedToScreen below), so this is
-	-- just the default starting spot.
+	-- Shorter than the export/import rows strictly need -- there was dead
+	-- space between the status line and the footer, in the way when
+	-- dragging the window to a new spot. Everything above (title/export/
+	-- import/status) is anchored from the TOP, so trimming this only eats
+	-- into that gap; the footer (anchored from BOTTOM) just moves up to
+	-- close it.
+	f:SetSize(380, 136)
+	-- Docked to the right of the Group Finder window, bottom edges aligned
+	-- (not below it, not vertically centered on it either) -- RaiderIO's
+	-- own overlay panel sits to the right near the TOP of LFGListFrame, so
+	-- anchoring our (short) window to the BOTTOM of that same right-hand
+	-- side clears it instead of overlapping. LFGListFrame might not exist
+	-- yet if this is the very first time the addon's own window is opened
+	-- (Blizzard_GroupFinder is load-on-demand) -- falls back to
+	-- screen-center in that case. Deliberately NOT movable/draggable (no
+	-- SetMovable/RegisterForDrag) -- this SetPoint anchor is a live relative
+	-- link, so as long as it's never broken by a drag, this window just
+	-- rides along automatically whenever LFGListFrame itself moves, instead
+	-- of needing its own OnUpdate tracking.
 	if LFGListFrame then
-		f:SetPoint("TOPRIGHT", LFGListFrame, "BOTTOMRIGHT", 0, -8)
+		f:SetPoint("BOTTOMLEFT", LFGListFrame, "BOTTOMRIGHT", 8, 0)
 	else
 		f:SetPoint("CENTER")
 	end
-	f:SetMovable(true)
-	f:EnableMouse(true)
-	f:RegisterForDrag("LeftButton")
-	f:SetScript("OnDragStart", f.StartMoving)
-	f:SetScript("OnDragStop", f.StopMovingOrSizing)
-	f:SetClampedToScreen(true)
 	tinsert(UISpecialFrames, "QueueAnalyzerFrame") -- Escape closes it
 
 	f.title = f:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
 	f.title:SetPoint("LEFT", f.TitleBg, "LEFT", 5, 0)
-	f.title:SetText("Queue Analyzer")
+	f.title:SetText("Analyzer")
 
 	local exportLabel = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
 	exportLabel:SetPoint("TOPLEFT", 16, -34)
@@ -211,12 +235,13 @@ local function CreateQueueAnalyzerFrame()
 	importButton:SetSize(74, 22)
 	importButton:SetPoint("LEFT", importBox, "RIGHT", 8, 0)
 	importButton:SetScript("OnClick", function()
-		local data = ParseImportText(f.importBox:GetText())
+		local data, mode = ParseImportText(f.importBox:GetText())
 		local count = 0
 		for _ in pairs(data) do
 			count = count + 1
 		end
 		QueueAnalyzerImportedData = data
+		QueueAnalyzerDisplayMode = mode
 		f.status:SetText(count .. " entries imported.")
 	end)
 
@@ -361,6 +386,10 @@ local function HookApplicantNamePrefix()
 	hookedApplicantNamePrefix = true
 
 	hooksecurefunc("LFGListApplicationViewer_UpdateApplicantMember", function(member, appID, memberIdx)
+		if QueueAnalyzerDisplayMode ~= "name" then
+			return -- "table" mode owns the readouts instead; leave Blizzard's own name untouched
+		end
+
 		local fullName = C_LFGList.GetApplicantMemberInfo(appID, memberIdx)
 		if not fullName then
 			return
@@ -429,17 +458,14 @@ local function GetLastRoleIcon(member)
 	return member.RoleIcon1
 end
 
--- Full combo, all four placements at once, to compare side by side live --
--- expected to prune down to whichever ones actually hold up once you've
--- seen them in game:
---   1. Name prefix (HookApplicantNamePrefix) -- unchanged.
---   2. After the last role icon: rank + log combined (unchanged from before).
---   3. After iLvl: rank alone, anchored to member.ItemLevel same way (2) is
+-- "Table" mode: three small readouts anchored next to the role icon, iLvl
+-- and Rating columns respectively -- the alternative to the name-prefix
+-- approach above (HookApplicantNamePrefix), never both at once (see
+-- QueueAnalyzerDisplayMode, set from the webapp's Table/Name toggle):
+--   1. After the last role icon: rank + log combined.
+--   2. After iLvl: rank alone, anchored to member.ItemLevel same way (1) is
 --      anchored to the role icon.
---   4. After Rating: log alone, anchored to member.Rating the same way --
---      this is the one most likely to collide with the Accept/Decline
---      buttons (confirmed no free space there in the earlier column
---      experiment), but the ask was to try it, so here it is.
+--   3. After Rating: log alone, anchored to member.Rating the same way.
 local hookedApplicantReadouts = false
 local function HookApplicantReadouts()
 	if hookedApplicantReadouts or not LFGListApplicationViewer_UpdateApplicantMember then
@@ -457,7 +483,10 @@ local function HookApplicantReadouts()
 			realm = GetNormalizedRealmName()
 		end
 
-		local data = GetImportedData(name, realm)
+		-- "name" mode owns the display instead -- clear our own readouts
+		-- (in case a previous import left "table" text sitting there from
+		-- earlier this session) rather than leaving stale numbers up.
+		local data = QueueAnalyzerDisplayMode == "table" and GetImportedData(name, realm) or nil
 
 		if not member.QueueAnalyzerRoleReadout then
 			member.QueueAnalyzerRoleReadout = member:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
