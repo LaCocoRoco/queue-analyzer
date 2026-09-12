@@ -26,6 +26,12 @@ jobs:
 
       - name: Package and release
         uses: BigWigsMods/packager@v2
-        working-directory: addon/QueueAnalyzer
+        with:
+          # working-directory: isn't a valid property on a `uses:` step at
+          # all (confirmed live -- GitHub rejects the whole workflow file
+          # with a schema error, not a runtime one) -- release.sh has its
+          # own -t flag for exactly this (a monorepo where the addon isn't
+          # at the repo root).
+          args: -t addon/QueueAnalyzer
         env:
           CF_API_TOKEN: ${{ secrets.CF_API_KEY }}
