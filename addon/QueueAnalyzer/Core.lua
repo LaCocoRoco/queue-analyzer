@@ -16,10 +16,19 @@
 BINDING_HEADER_QUEUEANALYZER = "Queue Analyzer"
 BINDING_NAME_QUEUEANALYZER_TOGGLE = "Show/export applicant names"
 
----Collect "Name-Realm" for every member of every current applicant.
----@return string[] names
+---Collect "Name-Realm" and Blizzard's own Mythic+ rating for every member
+---of every current applicant, as alternating entries (Name-Realm, then its
+---rating, repeating) -- C_LFGList.GetApplicantMemberInfo already returns
+---dungeonScore (Blizzard's own in-game Mythic+ rating, the same number
+---shown in the "Rating" column) in the very same call we use for the name,
+---at zero extra cost -- no separate request, no network round trip. This
+---is a DIFFERENT number from raider.io's own score (two independently
+---calculated ratings that happen to correlate closely, not the same
+---value) -- the webapp uses it as a fast default and only calls raider.io
+---itself if you explicitly ask it to.
+---@return string[] entries
 local function GetApplicantNames()
-	local names = {}
+	local entries = {}
 
 	local applicants = C_LFGList.GetApplicants()
 	if LFGListUtil_SortApplicants then
@@ -29,19 +38,21 @@ local function GetApplicantNames()
 		local info = C_LFGList.GetApplicantInfo(applicantID)
 		if info then
 			for memberIdx = 1, info.numMembers do
-				local fullName = C_LFGList.GetApplicantMemberInfo(applicantID, memberIdx)
+				local fullName, _, _, _, _, _, _, _, _, _, _, dungeonScore =
+					C_LFGList.GetApplicantMemberInfo(applicantID, memberIdx)
 				if fullName then
 					local name, realm = strsplit("-", fullName)
 					if not realm or realm == "" then
 						realm = GetNormalizedRealmName()
 					end
-					table.insert(names, name .. "-" .. realm)
+					table.insert(entries, name .. "-" .. realm)
+					table.insert(entries, tostring(math.floor((dungeonScore or 0) + 0.5)))
 				end
 			end
 		end
 	end
 
-	return names
+	return entries
 end
 
 -- Data imported from the webapp (pasted into the import window below), keyed
@@ -131,7 +142,19 @@ local frame
 local function CreateQueueAnalyzerFrame()
 	local f = CreateFrame("Frame", "QueueAnalyzerFrame", UIParent, "BasicFrameTemplateWithInset")
 	f:SetSize(380, 160)
-	f:SetPoint("CENTER")
+	-- Docked to the Group Finder window's bottom-right corner instead of
+	-- popping up center-screen -- RaiderIO's own overlay panel sits to the
+	-- right near the TOP of LFGListFrame, so anchoring low/right here should
+	-- clear it. LFGListFrame might not exist yet if this is the very first
+	-- time the addon's own window is opened (Blizzard_GroupFinder is
+	-- load-on-demand) -- falls back to screen-center in that case. Still
+	-- freely draggable afterwards (SetClampedToScreen below), so this is
+	-- just the default starting spot.
+	if LFGListFrame then
+		f:SetPoint("TOPRIGHT", LFGListFrame, "BOTTOMRIGHT", 0, -8)
+	else
+		f:SetPoint("CENTER")
+	end
 	f:SetMovable(true)
 	f:EnableMouse(true)
 	f:RegisterForDrag("LeftButton")
@@ -211,13 +234,13 @@ function QueueAnalyzer_RefreshExport()
 		return
 	end
 
-	local names = GetApplicantNames()
-	-- One flat ":"-delimited string instead of one name per line -- easier
-	-- to select/copy reliably as a single line, and the webapp reads it
-	-- back the same way (splits on ":"; names/realms never contain ":").
-	-- Empty when there are no applicants -- no placeholder text, just an
-	-- empty field.
-	local text = table.concat(names, ":")
+	local entries = GetApplicantNames()
+	-- One flat ":"-delimited string ("Name-Realm:Rating:Name-Realm:Rating:...")
+	-- instead of separate lines -- easier to select/copy reliably as a
+	-- single line, and the webapp reads it back the same way (splits on
+	-- ":"; names/realms never contain ":"). Empty when there are no
+	-- applicants -- no placeholder text, just an empty field.
+	local text = table.concat(entries, ":")
 
 	frame.exportBox:SetText(text)
 	-- Order matters: SetFocus() must come before HighlightText() -- the
