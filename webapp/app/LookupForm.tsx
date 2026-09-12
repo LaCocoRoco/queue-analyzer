@@ -3,7 +3,16 @@
 import { useEffect, useState, type CSSProperties } from "react";
 import { clearCredentials, loadCredentials, saveCredentials, type WclCredentials } from "@/lib/credentials";
 import { detectLocale, DICTS, DEFAULT_LOCALE } from "@/lib/i18n";
-import { fetchRioScores, LookupError, REGION, runLookup, withRanks, type LookupResult, type RankedResult } from "@/lib/lookup";
+import {
+  fetchRioScores,
+  LookupError,
+  parseClipboardEntries,
+  REGION,
+  runLookup,
+  withRanks,
+  type LookupResult,
+  type RankedResult,
+} from "@/lib/lookup";
 import { toServerSlug, validateCredentials } from "@/lib/wcl";
 
 // Flat ":"-delimited "Name-Realm:Best:Rank:Name-Realm:Best:Rank:..." -- the
@@ -62,6 +71,30 @@ function formatRank(rank: number): string {
   return `#${String(rank).padStart(2, "0")}`;
 }
 
+// Copies Blizzard's own in-game Mythic+ rating (blizzardScore, sent by the
+// addon alongside each name -- see lib/lookup.ts's parseClipboardEntries)
+// into the ioScore/ioColor slot, so the rest of the app (ranking, the IO
+// table column) doesn't need to know or care which source it came from.
+// Used whenever Filter is on but the RaiderIO toggle isn't -- no network
+// request at all, the data was already in the clipboard. raider.io hands
+// back its own color directly (see lib/rio.ts); Blizzard's rating has no
+// such API-provided color, so this reuses our own Logs-style percentile
+// tiers, min-max normalized across the current batch, same technique
+// rankResults already uses internally for weighting.
+function applyBlizzardScoreAsIo(results: LookupResult[]): LookupResult[] {
+  const withScore = results.filter((r) => r.blizzardScore > 0);
+  const min = withScore.length ? Math.min(...withScore.map((r) => r.blizzardScore)) : 0;
+  const max = withScore.length ? Math.max(...withScore.map((r) => r.blizzardScore)) : 0;
+
+  return results.map((r) => {
+    if (r.blizzardScore <= 0) {
+      return { ...r, ioScore: 0, ioColor: "#9D9D9D" };
+    }
+    const norm = max > min ? ((r.blizzardScore - min) / (max - min)) * 100 : 50;
+    return { ...r, ioScore: r.blizzardScore, ioColor: percentileColor(norm) };
+  });
+}
+
 type ButtonState = "idle" | "loading" | "done" | "error";
 
 const BUTTON_COLOR: Record<ButtonState, { bg: string; fg: string }> = {
@@ -96,14 +129,21 @@ export default function LookupForm() {
   const [results, setResults] = useState<LookupResult[] | null>(null);
   const [filterEnabled, setFilterEnabled] = useState(false);
   const [previewEnabled, setPreviewEnabled] = useState(false);
+  // Off by default: Blizzard's own in-game rating (sent by the addon with
+  // every export, no extra request) is the fast default IO source. Turning
+  // this on switches to an actual raider.io lookup instead.
+  const [raiderIoEnabled, setRaiderIoEnabled] = useState(false);
   const [logsWeight, setLogsWeight] = useState(50);
   const [ioWeight, setIoWeight] = useState(50);
 
-  // raider.io is fetched lazily, not as part of every lookup -- its
-  // on-demand "crawl" for a character it hasn't recently cached can take
-  // several seconds per character, so most lookups (Filter never turned
-  // on) skip it entirely. rioLoaded resets to false on every fresh set of
-  // results and flips true once the fetch below completes for them.
+  // "rioLoaded" now means "the IO slot is populated and ready", regardless
+  // of source -- raider.io's on-demand "crawl" for a character it hasn't
+  // recently cached can take several seconds, so that path is still lazy;
+  // Blizzard's rating is already sitting in `results` (from the addon
+  // export) and applying it is synchronous, so that path finishes
+  // "loading" instantly. Resets to false on every fresh set of results and
+  // whenever the RaiderIO toggle itself changes (switching sources needs a
+  // fresh pass either way).
   const [rioLoaded, setRioLoaded] = useState(false);
   const [rioLoading, setRioLoading] = useState(false);
 
@@ -115,8 +155,21 @@ export default function LookupForm() {
       .finally(() => setCredsLoading(false));
   }, []);
 
+  // Switching the RaiderIO toggle needs a fresh IO pass either way (its own
+  // fetch if turned on, or re-deriving from blizzardScore if turned off),
+  // so treat it like a new set of results as far as "is the IO slot ready"
+  // goes.
+  useEffect(() => {
+    setRioLoaded(false);
+  }, [raiderIoEnabled]);
+
   useEffect(() => {
     if (!filterEnabled || !results || rioLoaded || rioLoading) {
+      return;
+    }
+    if (!raiderIoEnabled) {
+      setResults(applyBlizzardScoreAsIo(results));
+      setRioLoaded(true);
       return;
     }
     setRioLoading(true);
@@ -126,7 +179,7 @@ export default function LookupForm() {
         setRioLoaded(true);
       })
       .finally(() => setRioLoading(false));
-  }, [filterEnabled, results, rioLoaded, rioLoading]);
+  }, [filterEnabled, raiderIoEnabled, results, rioLoaded, rioLoading]);
 
   async function handleSaveCredentials() {
     setValidationError(null);
@@ -175,26 +228,35 @@ export default function LookupForm() {
     setButtonState("loading");
     try {
       const rawText = await navigator.clipboard.readText();
-      const names = rawText
-        .split(/[:\n]/)
-        .map((l) => l.trim())
-        .filter(Boolean);
-      if (names.length === 0) {
+      // The addon exports "Name-Realm:Rating:Name-Realm:Rating:..." now --
+      // Rating is Blizzard's own in-game Mythic+ rating (see Core.lua's
+      // GetApplicantNames), free with the same call that gets the name.
+      const entries = parseClipboardEntries(rawText);
+      if (entries.length === 0) {
         throw new Error(t.errorNoNames);
       }
+      const names = entries.map((e) => e.key);
+      const blizzardScoreByKey = new Map(entries.map((e) => [e.key, e.blizzardScore]));
 
       let finalResults = await runLookup(names, creds.clientId, creds.clientSecret);
+      finalResults = finalResults.map((r) => ({ ...r, blizzardScore: blizzardScoreByKey.get(r.key) ?? 0 }));
 
       // Lazy-loading raider.io (see the effect above) is only for turning
       // Filter on AFTER an already-finished lookup. If Filter is already on
-      // right now, there's no "later" to defer to -- fetch raider.io before
-      // this handler is done, same as the pre-lazy-load design, so the
-      // button doesn't claim "done" (and the table doesn't stop spinning)
-      // while raider.io data is still missing.
+      // right now, there's no "later" to defer to -- resolve the IO slot
+      // before this handler is done, same as the pre-lazy-load design, so
+      // the button doesn't claim "done" (and the table doesn't stop
+      // spinning) while it's still missing. Only an actual network wait
+      // (raider.io) needs that upfront resolve -- Blizzard's rating is
+      // already in finalResults from the export, applying it is instant.
       if (filterEnabled) {
-        setRioLoading(true);
-        finalResults = await fetchRioScores(finalResults, REGION);
-        setRioLoading(false);
+        if (raiderIoEnabled) {
+          setRioLoading(true);
+          finalResults = await fetchRioScores(finalResults, REGION);
+          setRioLoading(false);
+        } else {
+          finalResults = applyBlizzardScoreAsIo(finalResults);
+        }
         setRioLoaded(true);
       } else {
         setRioLoaded(false);
@@ -206,13 +268,16 @@ export default function LookupForm() {
       // (confirmed against Blizzard's own LFGList.lua -- displayOrderID is
       // read-only), so re-sorting the export string wouldn't let the addon
       // re-sort its native window either -- it'd just make the string
-      // harder to match against what's on screen in-game. Rank is computed
-      // (still in original order, see withRanks) when Filter is on, or left
-      // at 0 for every entry when it's off -- the addon reads 0 as "no rank
-      // to show".
-      const rankedResults: RankedResult[] = filterEnabled
-        ? withRanks(finalResults, logsWeight, ioWeight)
-        : finalResults.map((r) => ({ ...r, rank: 0 }));
+      // harder to match against what's on screen in-game. Rank is always
+      // computed now (still in original order, see withRanks), not just
+      // when Filter is on -- pure Logs ranking (ioWeight 0) when Filter is
+      // off, so applicants still get a rank in-game even without ever
+      // touching Filter.
+      const rankedResults: RankedResult[] = withRanks(
+        finalResults,
+        filterEnabled ? logsWeight : 100,
+        filterEnabled ? ioWeight : 0
+      );
       await navigator.clipboard.writeText(toExportString(rankedResults));
 
       setButtonState("done");
@@ -296,19 +361,19 @@ export default function LookupForm() {
 
   const colors = BUTTON_COLOR[buttonState];
 
-  // Sorted purely for on-screen analysis -- the export to clipboard always
-  // stays in the original applicant-list order (see handleReadFromClipboard),
-  // since we can't reorder WoW's own list anyway. The table isn't bound by
-  // that, and an unsorted table is just harder to read at a glance. Ranked
-  // (IO-aware) sort only once raider.io data has actually arrived --
-  // otherwise every ioScore is still 0 and "ranking" by that would just be
-  // a confusing, temporary Logs-only order that's about to jump around.
-  const rankAware = filterEnabled && rioLoaded;
-  const displayRows = !results
-    ? []
-    : rankAware
-      ? withRanks(results, logsWeight, ioWeight).slice().sort((a, b) => a.rank - b.rank)
-      : results.slice().sort((a, b) => b.best - a.best);
+  // A rank is always shown now, filter or not -- pure Logs ranking
+  // (ioWeight 0) until Filter is actually on AND raider.io data has
+  // arrived; using the real ioWeight before rioLoaded would rank everyone
+  // as if their IO score were 0, a confusing order that's about to jump
+  // around the moment the fetch finishes.
+  const showIoColumn = filterEnabled && rioLoaded;
+  const effectiveLogsWeight = showIoColumn ? logsWeight : 100;
+  const effectiveIoWeight = showIoColumn ? ioWeight : 0;
+  const displayRows = results
+    ? withRanks(results, effectiveLogsWeight, effectiveIoWeight)
+        .slice()
+        .sort((a, b) => a.rank - b.rank)
+    : [];
 
   return (
     <div className="qa-card" style={{ display: "flex", flexDirection: "column", alignItems: "center" }}>
@@ -351,11 +416,14 @@ export default function LookupForm() {
         <p style={{ color: "#ff6b6b", marginTop: 12, fontSize: 13 }}>{errorMessage}</p>
       )}
 
-      {/* Preview and Filter are independent: Preview alone just shows the
-          table (Name + WCL Logs%). Filter alone reveals the weight
-          sliders and changes the table to Rank order. Both together adds
-          the raider.io score and Rank columns. */}
-      <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 22, alignSelf: "flex-start" }}>
+      {/* Preview, Filter and RaiderIO are independent toggles, all peers of
+          each other: Preview alone just shows the table (Name + WCL Log%).
+          Filter alone reveals the weight sliders and switches the table to
+          Rank order, using Blizzard's own in-game rating (free, no
+          request) as the Score source by default. RaiderIO only matters
+          once Filter is also on -- it swaps that default for an actual
+          raider.io lookup instead. */}
+      <div style={{ display: "flex", gap: 20, marginTop: 22, alignSelf: "flex-start" }}>
         <label className="qa-toggle">
           <input type="checkbox" checked={previewEnabled} onChange={(e) => setPreviewEnabled(e.target.checked)} />
           <span className="qa-toggle-track" />
@@ -367,12 +435,18 @@ export default function LookupForm() {
           <span className="qa-toggle-track" />
           <span className="qa-toggle-label">Filter</span>
         </label>
+
+        <label className="qa-toggle">
+          <input type="checkbox" checked={raiderIoEnabled} onChange={(e) => setRaiderIoEnabled(e.target.checked)} />
+          <span className="qa-toggle-track" />
+          <span className="qa-toggle-label">RaiderIO</span>
+        </label>
       </div>
 
       {filterEnabled && (
         <div style={{ marginTop: 14, display: "flex", flexDirection: "column", gap: 10, width: "100%" }}>
           <div style={{ display: "grid", gridTemplateColumns: "40px 1fr 28px", alignItems: "center", gap: 10 }}>
-            <span style={{ fontSize: 12, color: "#aaa", fontWeight: 700, letterSpacing: "0.03em" }}>LOGS</span>
+            <span style={{ fontSize: 12, color: "#aaa", fontWeight: 700, letterSpacing: "0.03em" }}>LOG</span>
             <input
               className="qa-slider"
               type="range"
@@ -385,7 +459,7 @@ export default function LookupForm() {
             <span style={{ fontSize: 12, color: "#ddd", fontWeight: 700, textAlign: "right" }}>{logsWeight}</span>
           </div>
           <div style={{ display: "grid", gridTemplateColumns: "40px 1fr 28px", alignItems: "center", gap: 10 }}>
-            <span style={{ fontSize: 12, color: "#aaa", fontWeight: 700, letterSpacing: "0.03em" }}>IO</span>
+            <span style={{ fontSize: 12, color: "#aaa", fontWeight: 700, letterSpacing: "0.03em" }}>SCORE</span>
             <input
               className="qa-slider"
               type="range"
@@ -404,43 +478,38 @@ export default function LookupForm() {
         <table className="qa-table" style={{ marginTop: 20 }}>
           <thead>
             <tr>
-              {filterEnabled && <th style={{ textAlign: "right", width: "1%", whiteSpace: "nowrap" }}>Rank</th>}
+              <th style={{ textAlign: "right", width: "1%", whiteSpace: "nowrap" }}>Rank</th>
               <th style={{ textAlign: "left" }}>Name</th>
-              <th>Logs</th>
-              {filterEnabled && <th>IO</th>}
+              <th>LOG</th>
+              {filterEnabled && <th>Score</th>}
             </tr>
           </thead>
           <tbody>
-            {displayRows.map((r) => {
-              const ranked = rankAware ? (r as RankedResult) : null;
-              return (
-                <tr key={r.key}>
-                  {filterEnabled && (
-                    <td style={{ textAlign: "right", whiteSpace: "nowrap", fontWeight: ranked?.rank === 1 ? 700 : 400 }}>
-                      {ranked ? formatRank(ranked.rank) : <span className="qa-spinner" />}
-                    </td>
-                  )}
-                  <td style={{ textAlign: "left", fontWeight: 600 }}>
-                    <a
-                      href={wclCharacterUrl(r.name, r.realm)}
-                      target="_blank"
-                      rel="noreferrer"
-                      style={{ color: r.classId ? CLASS_COLORS[r.classId] : "inherit", textDecoration: "none" }}
-                    >
-                      {r.name}
-                    </a>
+            {displayRows.map((r) => (
+              <tr key={r.key}>
+                <td style={{ textAlign: "right", whiteSpace: "nowrap", fontWeight: r.rank === 1 ? 700 : 400 }}>
+                  {formatRank(r.rank)}
+                </td>
+                <td style={{ textAlign: "left", fontWeight: 600 }}>
+                  <a
+                    href={wclCharacterUrl(r.name, r.realm)}
+                    target="_blank"
+                    rel="noreferrer"
+                    style={{ color: r.classId ? CLASS_COLORS[r.classId] : "inherit", textDecoration: "none" }}
+                  >
+                    {r.name}
+                  </a>
+                </td>
+                <td style={{ color: r.error ? undefined : percentileColor(r.best), fontWeight: 700 }}>
+                  {r.error ? "-" : Math.round(r.best)}
+                </td>
+                {filterEnabled && (
+                  <td style={{ color: showIoColumn && r.ioScore > 0 ? r.ioColor : undefined, fontWeight: 700 }}>
+                    {showIoColumn ? (r.ioScore > 0 ? Math.round(r.ioScore) : "-") : <span className="qa-spinner" />}
                   </td>
-                  <td style={{ color: r.error ? undefined : percentileColor(r.best), fontWeight: 700 }}>
-                    {r.error ? "-" : Math.round(r.best)}
-                  </td>
-                  {filterEnabled && (
-                    <td>
-                      {ranked ? (ranked.ioScore > 0 ? Math.round(ranked.ioScore) : "-") : <span className="qa-spinner" />}
-                    </td>
-                  )}
-                </tr>
-              );
-            })}
+                )}
+              </tr>
+            ))}
           </tbody>
         </table>
       )}

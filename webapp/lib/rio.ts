@@ -21,6 +21,12 @@ export interface RioProfile {
   // conventionally means what's equipped, and total has been unreliable
   // in live testing (frequently 0 even when equipped is populated).
   itemLevel: number;
+  // raider.io computes and returns its own color for the score directly
+  // (mythic_plus_scores_by_season[0].segments.all.color) -- confirmed live,
+  // a smooth gradient (grey -> green -> blue -> purple -> orange as score
+  // rises) rather than fixed tiers like WCL's. No need to reverse-engineer
+  // thresholds ourselves; just use what they hand back.
+  color: string;
 }
 
 // Returns null if raider.io doesn't know this character (own realm/name
@@ -39,7 +45,8 @@ export async function getRioProfile(name: string, realmSlug: string, region: str
     const data = await res.json();
     const score = data?.mythic_plus_scores_by_season?.[0]?.scores?.all ?? 0;
     const itemLevel = data?.gear?.item_level_equipped ?? 0;
-    return { score, itemLevel };
+    const color = data?.mythic_plus_scores_by_season?.[0]?.segments?.all?.color ?? "#9d9d9d";
+    return { score, itemLevel, color };
   } catch {
     return null;
   }

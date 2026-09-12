@@ -41,15 +41,27 @@ export interface LookupResult {
   best: number;
   median: number;
   runs: number;
-  // raider.io data -- 0 until fetchRioScores() has been run for this
+  // raider.io data -- 0/grey until fetchRioScores() has been run for this
   // result (lazy: only fetched once the "Filter" toggle is switched on,
   // see LookupForm.tsx -- raider.io's on-demand "crawl" for a character it
   // hasn't recently cached can take several seconds, so this is skipped
   // entirely for the common case of never enabling Filter at all).
   ioScore: number;
+  // raider.io's own color for ioScore (see lib/rio.ts) -- their gradient,
+  // not something we compute ourselves.
+  ioColor: string;
   itemLevel: number;
+  // Blizzard's own in-game Mythic+ rating (C_LFGList's dungeonScore), sent
+  // by the addon alongside each Name-Realm in the export -- see
+  // parseClipboardEntries. A DIFFERENT number from raider.io's ioScore
+  // (independently calculated, not the same value, just correlated) --
+  // used as the fast, no-network default for the "IO" ranking slot when
+  // the RaiderIO toggle is off, see LookupForm.tsx.
+  blizzardScore: number;
   error?: string;
 }
+
+const NO_IO_COLOR = "#9D9D9D";
 
 function parseNameRealm(line: string): { name: string; realm: string } | null {
   // Character names never contain "-"; realm names emitted by the addon
@@ -58,6 +70,25 @@ function parseNameRealm(line: string): { name: string; realm: string } | null {
   const idx = line.indexOf("-");
   if (idx <= 0 || idx === line.length - 1) return null;
   return { name: line.slice(0, idx), realm: line.slice(idx + 1) };
+}
+
+// The addon exports "Name-Realm:Rating:Name-Realm:Rating:..." (see
+// Core.lua's GetApplicantNames) -- fixed alternating pairs, Blizzard's own
+// in-game Mythic+ rating right after each name. Splits the raw clipboard
+// text and pairs tokens up two at a time rather than relying on
+// parseNameRealm's "-" heuristic per token, since a bare rating number
+// wouldn't contain one anyway and would just get silently dropped.
+export function parseClipboardEntries(rawText: string): { key: string; blizzardScore: number }[] {
+  const tokens = rawText
+    .split(/[:\n]/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+
+  const entries: { key: string; blizzardScore: number }[] = [];
+  for (let i = 0; i + 1 < tokens.length; i += 2) {
+    entries.push({ key: tokens[i], blizzardScore: Number(tokens[i + 1]) || 0 });
+  }
+  return entries;
 }
 
 // Returns null for characters whose current role is tank or healer -- their
@@ -71,7 +102,21 @@ async function lookupOne(name: string, realm: string, clientId: string, clientSe
   try {
     profile = await getCharacterProfile(name, slug, REGION, ZONE_ID, PARTITION, clientId, clientSecret);
   } catch (err) {
-    return { key, name, realm, classId: null, found: false, best: 0, median: 0, runs: 0, ioScore: 0, itemLevel: 0, error: (err as Error).message };
+    return {
+      key,
+      name,
+      realm,
+      classId: null,
+      found: false,
+      best: 0,
+      median: 0,
+      runs: 0,
+      ioScore: 0,
+      ioColor: NO_IO_COLOR,
+      blizzardScore: 0,
+      itemLevel: 0,
+      error: (err as Error).message,
+    };
   }
 
   if (profile?.role === "tank" || profile?.role === "healer") {
@@ -90,22 +135,37 @@ async function lookupOne(name: string, realm: string, clientId: string, clientSe
       median: zr.medianPerformanceAverage ?? 0,
       runs: runsEstimate(zr),
       ioScore: 0,
+      ioColor: NO_IO_COLOR,
+      blizzardScore: 0,
       itemLevel: 0,
     };
   }
   // Known to WCL (or not) but no logs for this zone/partition -- show as
   // a flat 0 rather than a placeholder string.
-  return { key, name, realm, classId: profile?.classId ?? null, found: false, best: 0, median: 0, runs: 0, ioScore: 0, itemLevel: 0 };
+  return {
+    key,
+    name,
+    realm,
+    classId: profile?.classId ?? null,
+    found: false,
+    best: 0,
+    median: 0,
+    runs: 0,
+    ioScore: 0,
+    ioColor: NO_IO_COLOR,
+    blizzardScore: 0,
+    itemLevel: 0,
+  };
 }
 
 // Fetches raider.io data for an existing result set and returns a new array
-// with ioScore/itemLevel filled in -- called separately (and lazily, only
-// when needed) rather than as part of lookupOne/runLookup, see
+// with ioScore/ioColor/itemLevel filled in -- called separately (and
+// lazily, only when needed) rather than as part of lookupOne/runLookup, see
 // LookupResult's ioScore field comment for why.
 export async function fetchRioScores(results: LookupResult[], region: string): Promise<LookupResult[]> {
   return mapWithConcurrency(results, CONCURRENCY, async (r) => {
     const rio = await getRioProfile(r.name, toServerSlug(r.realm), region);
-    return { ...r, ioScore: rio?.score ?? 0, itemLevel: rio?.itemLevel ?? 0 };
+    return { ...r, ioScore: rio?.score ?? 0, ioColor: rio?.color ?? NO_IO_COLOR, itemLevel: rio?.itemLevel ?? 0 };
   });
 }
 
