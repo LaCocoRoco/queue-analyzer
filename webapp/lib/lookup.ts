@@ -5,7 +5,7 @@
 // this used to be a Next.js API route (server-side), moved here unchanged
 // in logic when the app became a static export with no server at all.
 
-import { getCharacterProfile, getCurrentSeason, hasData, runsEstimate, toServerSlug } from "./wcl";
+import { getCharacterProfile, getCurrentSeason, hasData, runsEstimate, toServerSlug, type Role } from "./wcl";
 import { getRioProfile } from "./rio";
 
 export const REGION = process.env.NEXT_PUBLIC_WCL_REGION ?? "EU";
@@ -36,6 +36,13 @@ export interface LookupResult {
   realm: string;
   classId: number | null;
   found: boolean;
+  // addonRole if the addon sent one, else WCL's own cached role, else null
+  // -- see lookupOne. Tanks and healers are no longer excluded from results
+  // (everyone gets a Log value now), but they're excluded from ranking
+  // (withRanks gives them rank 0) and sorted to the end of the display
+  // table -- "rank" only ever meant "how does this DPS compare to the
+  // other DPS applicants".
+  role: Role | null;
   // Season and Dungeon values are BOTH always fetched (one WCL query
   // already returns everything -- see lookupOne) and kept side by side
   // here, rather than collapsing to a single best/median/runs at fetch
@@ -88,10 +95,33 @@ function parseNameRealm(line: string): { name: string; realm: string } | null {
   return { name: line.slice(0, idx), realm: line.slice(idx + 1) };
 }
 
-// The addon exports "Name:Server:ItemLevel:Score:Name:Server:ItemLevel:Score:
-// ...:Dungeon:EXPORT" (see Core.lua's GetApplicantNames/QueueAnalyzer_RefreshExport)
-// -- fixed quadruplets (Name, Server, Blizzard's own item level, Blizzard's
-// own in-game Mythic+ rating) for every applicant member, followed by ONE
+// Blizzard's own assignedRole string (see Core.lua's GetApplicantNames) --
+// "TANK"/"HEALER"/"DAMAGER" is the standard convention used across
+// Blizzard's own APIs (e.g. UnitGroupRolesAssigned). This is the role
+// Blizzard itself resolved for THIS SPECIFIC application, not the raw
+// tank/healer/damage capability flags (which can all be true at once for a
+// flexible/multi-spec application) -- exactly the thing that would
+// otherwise have to be guessed at from a cached, possibly-stale WCL spec
+// lookup. Returns null for "NONE"/empty/anything unrecognized, in which
+// case lookupOne falls back to WCL's own gameData-derived role instead.
+function parseAssignedRole(raw: string): Role | null {
+  switch (raw) {
+    case "TANK":
+      return "tank";
+    case "HEALER":
+      return "healer";
+    case "DAMAGER":
+      return "dps";
+    default:
+      return null;
+  }
+}
+
+// The addon exports "Name:Server:ItemLevel:Score:Role:Name:Server:ItemLevel:
+// Score:Role:...:Dungeon:EXPORT" (see Core.lua's GetApplicantNames/
+// QueueAnalyzer_RefreshExport) -- fixed quintuplets (Name, Server,
+// Blizzard's own item level, Blizzard's own in-game Mythic+ rating,
+// Blizzard's own assignedRole) for every applicant member, followed by ONE
 // trailing Dungeon field (the leader's current Keystone dungeon, empty if
 // none -- see Core.lua's GetCurrentDungeonName) and the "EXPORT" marker.
 // Dungeon sits at the END, not repeated per applicant, since it's a single
@@ -109,7 +139,7 @@ function parseNameRealm(line: string): { name: string; realm: string } | null {
 // Export output.
 export function parseClipboardText(rawText: string): {
   dungeonName: string | null;
-  entries: { key: string; blizzardScore: number; blizzardItemLevel: number }[];
+  entries: { key: string; blizzardScore: number; blizzardItemLevel: number; addonRole: Role | null }[];
 } {
   const trimmed = rawText.trim();
   if (trimmed === "") {
@@ -123,8 +153,8 @@ export function parseClipboardText(rawText: string): {
   const dungeonName = tokens[tokens.length - 1]?.trim() || null;
   const memberTokens = tokens.slice(0, -1);
 
-  const entries: { key: string; blizzardScore: number; blizzardItemLevel: number }[] = [];
-  for (let i = 0; i + 3 < memberTokens.length; i += 4) {
+  const entries: { key: string; blizzardScore: number; blizzardItemLevel: number; addonRole: Role | null }[] = [];
+  for (let i = 0; i + 4 < memberTokens.length; i += 5) {
     const name = memberTokens[i];
     const server = memberTokens[i + 1];
     if (!name || !server) continue;
@@ -132,20 +162,30 @@ export function parseClipboardText(rawText: string): {
       key: `${name}-${server}`,
       blizzardItemLevel: Number(memberTokens[i + 2]) || 0,
       blizzardScore: Number(memberTokens[i + 3]) || 0,
+      addonRole: parseAssignedRole(memberTokens[i + 4]),
     });
   }
   return { dungeonName, entries };
 }
 
-// Returns null for characters whose current role is tank or healer -- their
-// DPS percentile is meaningless and just adds noise to a DPS-focused list.
-// Characters we couldn't determine a role for (no cached gameData) are kept.
+// Everyone gets a Log value now -- tanks and healers are no longer
+// excluded from the results, just from ranking (see withRanks). addonRole
+// (Blizzard's own assignedRole for this specific application, see
+// parseClipboardText) picks the metric for the WCL query itself (damage
+// vs. healing) -- it has to be known BEFORE fetching, so unlike other
+// per-character data this can't wait on WCL's own gameData-derived role,
+// which only arrives as PART OF that same fetch. Falls back to treating an
+// unknown/missing addonRole as damage-focused (points_and_damage/dps) by
+// default. The FINAL role recorded on the result (used later for ranking)
+// still prefers addonRole but falls back to WCL's cached role if the addon
+// didn't send one at all.
 async function lookupOne(
   name: string,
   realm: string,
   zoneID: number,
   partition: number,
   encounterID: number | undefined,
+  addonRole: Role | null,
   clientId: string,
   clientSecret: string
 ): Promise<LookupResult | null> {
@@ -154,7 +194,17 @@ async function lookupOne(
 
   let profile;
   try {
-    profile = await getCharacterProfile(name, slug, REGION, zoneID, partition, clientId, clientSecret, encounterID);
+    profile = await getCharacterProfile(
+      name,
+      slug,
+      REGION,
+      zoneID,
+      partition,
+      clientId,
+      clientSecret,
+      encounterID,
+      addonRole
+    );
   } catch (err) {
     return {
       key,
@@ -162,6 +212,7 @@ async function lookupOne(
       realm,
       classId: null,
       found: false,
+      role: addonRole,
       seasonBest: 0,
       seasonMedian: 0,
       seasonRuns: 0,
@@ -177,10 +228,7 @@ async function lookupOne(
     };
   }
 
-  if (profile?.role === "tank" || profile?.role === "healer") {
-    return null;
-  }
-
+  const role = addonRole ?? profile?.role ?? null;
   const zr = profile?.zoneRankings ?? null;
   if (hasData(zr)) {
     // Season: bestPerformanceAverage/medianPerformanceAverage straight from
@@ -204,6 +252,7 @@ async function lookupOne(
       realm,
       classId: profile!.classId,
       found: true,
+      role,
       seasonBest: zr.bestPerformanceAverage ?? 0,
       seasonMedian: zr.medianPerformanceAverage ?? 0,
       seasonRuns: runsEstimate(zr),
@@ -225,6 +274,7 @@ async function lookupOne(
     realm,
     classId: profile?.classId ?? null,
     found: false,
+    role,
     seasonBest: 0,
     seasonMedian: 0,
     seasonRuns: 0,
@@ -340,11 +390,16 @@ export interface RankedResult extends EffectiveResult {
 // an addon (confirmed against Blizzard's own LFGList.lua), so re-sorting
 // the webapp's own view would just make it harder to match against the
 // in-game list -- the rank NUMBER is the useful artifact here, not the
-// row order.
+// row order. Tanks and healers are excluded from the ranking pool itself
+// (rank only ever meant "how does this DPS compare to the other DPS
+// applicants") and get rank 0 -- the same sentinel already used for
+// "Filter wasn't on for this export", so the addon-side display/coloring
+// logic doesn't need a separate code path for it.
 export function withRanks(results: EffectiveResult[], logsWeight: number, ioWeight: number): RankedResult[] {
-  const scored = rankResults(results, logsWeight, ioWeight);
+  const rankable = results.filter((r) => r.role !== "tank" && r.role !== "healer");
+  const scored = rankResults(rankable, logsWeight, ioWeight);
   const rankByKey = new Map(scored.map((r, i) => [r.key, i + 1]));
-  return results.map((r) => ({ ...r, rank: rankByKey.get(r.key)! }));
+  return results.map((r) => ({ ...r, rank: rankByKey.get(r.key) ?? 0 }));
 }
 
 // dungeonName: the addon-exported current Keystone dungeon (see
@@ -355,11 +410,17 @@ export function withRanks(results: EffectiveResult[], logsWeight: number, ioWeig
 // current season's encounter list, or simply no active Keystone listing)
 // just leaves encounterID undefined below, so the dungeon-specific fields
 // end up 0 ("no data") rather than erroring.
+//
+// roleByKey: Blizzard's own assignedRole per applicant (see
+// parseClipboardText/parseAssignedRole), keyed by "Name-Realm" -- passed
+// through to lookupOne so the tank/healer exclusion can use it instead of
+// (or as well as) WCL's own cached role.
 export async function runLookup(
   rawNames: string[],
   clientId: string,
   clientSecret: string,
-  dungeonName: string | null
+  dungeonName: string | null,
+  roleByKey: Map<string, Role | null>
 ): Promise<LookupResult[]> {
   const season = await getCurrentSeason(clientId, clientSecret);
   if (!season.zoneID || !season.partition) {
@@ -379,7 +440,16 @@ export async function runLookup(
 
   const results = (
     await mapWithConcurrency(entries, CONCURRENCY, ({ name, realm }) =>
-      lookupOne(name, realm, season.zoneID, season.partition, encounterID, clientId, clientSecret)
+      lookupOne(
+        name,
+        realm,
+        season.zoneID,
+        season.partition,
+        encounterID,
+        roleByKey.get(`${name}-${realm}`) ?? null,
+        clientId,
+        clientSecret
+      )
     )
   ).filter((r): r is LookupResult => r !== null);
 

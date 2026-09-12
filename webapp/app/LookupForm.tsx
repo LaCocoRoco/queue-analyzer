@@ -59,12 +59,28 @@ const CLASS_COLORS: Record<number, string> = {
 };
 
 // WCL's own parse-percentile color tiers (orange/purple/blue/green/grey),
-// matching the standard WoW item-quality colors those names mirror.
+// matching the standard WoW item-quality colors those names mirror. Used
+// for the LOG value specifically.
 function percentileColor(pct: number): string {
   if (pct >= 95) return "#FF8000";
   if (pct >= 75) return "#A335EE";
   if (pct >= 50) return "#0070DD";
   if (pct >= 25) return "#1EFF00";
+  return "#9D9D9D";
+}
+
+// Same 5 colors as percentileColor, but keyed by absolute RANK POSITION
+// (1st/2nd/3rd/4th, everything else grey) instead of a percentile value --
+// a deliberately separate function, not a reuse of percentileColor, since
+// the two used to look identical in-game (rank digits were colored by the
+// LOG percentile) which read as "these two numbers are the same thing"
+// when they aren't. 0 (unranked -- tanks/healers, see withRanks) falls
+// through to grey along with every rank past 4th.
+function rankColor(rank: number): string {
+  if (rank === 1) return "#FF8000";
+  if (rank === 2) return "#A335EE";
+  if (rank === 3) return "#0070DD";
+  if (rank === 4) return "#1EFF00";
   return "#9D9D9D";
 }
 
@@ -74,9 +90,11 @@ function wclCharacterUrl(name: string, realm: string): string {
 }
 
 // Zero-padded to 2 digits (#1 -> #01) -- purely cosmetic, requested as a
-// quick visual test; ranks past 99 just keep their natural width.
+// quick visual test; ranks past 99 just keep their natural width. 0 (tanks/
+// healers -- see withRanks) isn't a real rank at all, shown as "-" instead
+// of the misleading "#00".
 function formatRank(rank: number): string {
-  return `#${String(rank).padStart(2, "0")}`;
+  return rank > 0 ? `#${String(rank).padStart(2, "0")}` : "-";
 }
 
 // Copies Blizzard's own in-game Mythic+ rating (blizzardScore, sent by the
@@ -279,12 +297,13 @@ export default function LookupForm() {
       const names = entries.map((e) => e.key);
       const blizzardScoreByKey = new Map(entries.map((e) => [e.key, e.blizzardScore]));
       const blizzardItemLevelByKey = new Map(entries.map((e) => [e.key, e.blizzardItemLevel]));
+      const roleByKey = new Map(entries.map((e) => [e.key, e.addonRole]));
 
       // Always resolved regardless of dungeonMode -- both season and
       // dungeon values get fetched every time (one WCL query covers both,
       // see lib/wcl.ts), so switching the Season/Dungeon toggle afterwards
       // can update the table instantly instead of needing a re-import.
-      let finalResults = await runLookup(names, creds.clientId, creds.clientSecret, dungeonName);
+      let finalResults = await runLookup(names, creds.clientId, creds.clientSecret, dungeonName, roleByKey);
       finalResults = finalResults.map((r) => {
         const blizzardItemLevel = blizzardItemLevelByKey.get(r.key) ?? 0;
         return {
@@ -423,10 +442,17 @@ export default function LookupForm() {
   const useWeightedRanking = filterEnabled && rioLoaded;
   const effectiveLogsWeight = useWeightedRanking ? logsWeight : 100;
   const effectiveIoWeight = useWeightedRanking ? ioWeight : 0;
+  // Unranked (tanks/healers, rank 0) always sort to the end, after every
+  // real rank -- "erscheinen am Ende der Tabelle ohne Rang".
   const displayRows = results
     ? withRanks(withEffectiveMode(results, dungeonMode), effectiveLogsWeight, effectiveIoWeight)
         .slice()
-        .sort((a, b) => a.rank - b.rank)
+        .sort((a, b) => {
+          if (a.rank === 0 && b.rank === 0) return 0;
+          if (a.rank === 0) return 1;
+          if (b.rank === 0) return -1;
+          return a.rank - b.rank;
+        })
     : [];
 
   return (
@@ -621,7 +647,7 @@ export default function LookupForm() {
           <tbody>
             {displayRows.map((r) => (
               <tr key={r.key}>
-                <td style={{ textAlign: "right", whiteSpace: "nowrap", fontWeight: r.rank === 1 ? 700 : 400 }}>
+                <td style={{ textAlign: "right", whiteSpace: "nowrap", fontWeight: 700, color: rankColor(r.rank) }}>
                   {formatRank(r.rank)}
                 </td>
                 <td style={{ textAlign: "left", fontWeight: 600 }}>

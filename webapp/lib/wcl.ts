@@ -320,23 +320,24 @@ export interface CharacterProfile {
   role: Role | null;
 }
 
-// metric: points_and_damage -- confirmed live (real character, real key
-// runs) against WCL's own character page: bestPerformanceAverage matches
-// the site's season-wide "Best DPS % Avg" exactly. Healers will eventually
-// use metric: points_and_healing the same way; tanks are intentionally
-// excluded (see lib/lookup.ts's lookupOne) since neither variant means
-// anything meaningful for a role that does little damage or healing by
-// design.
+// metric: points_and_damage for DPS and tanks, points_and_healing for
+// healers -- confirmed live (real character, real key runs) against WCL's
+// own character page: bestPerformanceAverage matches the site's season-wide
+// "Best DPS % Avg" exactly for points_and_damage. Every role gets a Log
+// value now (tanks/healers are no longer excluded -- see lib/lookup.ts's
+// lookupOne), just not ranked against the DPS pool. $metric is a variable
+// (not hardcoded) specifically so getCharacterProfile can pick the
+// role-appropriate one.
 //
 // gameData is WCL's cached copy of Blizzard's own character profile API
 // response (no extra live Blizzard call -- same cost as the rest of this
 // query); we only need character_class.name out of it.
 const CHARACTER_PROFILE_QUERY = `
-query($name: String!, $serverSlug: String!, $serverRegion: String!, $zoneID: Int!, $partition: Int!) {
+query($name: String!, $serverSlug: String!, $serverRegion: String!, $zoneID: Int!, $partition: Int!, $metric: CharacterPageRankingMetricType!) {
   characterData {
     character(name: $name, serverSlug: $serverSlug, serverRegion: $serverRegion) {
       gameData
-      zoneRankings(zoneID: $zoneID, partition: $partition, metric: points_and_damage)
+      zoneRankings(zoneID: $zoneID, partition: $partition, metric: $metric)
     }
   }
 }`;
@@ -344,11 +345,15 @@ query($name: String!, $serverSlug: String!, $serverRegion: String!, $zoneID: Int
 // Dungeon-specific query (Dungeon mode) -- see EncounterRanking's comment
 // for why this needs its own request and its own metric/byBracket
 // combination, rather than reusing anything from the season query above.
+// metric: dps for DPS/tanks, hps for healers -- same role split as the
+// season query, just using encounterRankings' own metric enum (dps/hps
+// instead of points_and_damage/points_and_healing, which aren't valid
+// here -- confirmed live).
 const ENCOUNTER_PROFILE_QUERY = `
-query($name: String!, $serverSlug: String!, $serverRegion: String!, $encounterID: Int!, $partition: Int!) {
+query($name: String!, $serverSlug: String!, $serverRegion: String!, $encounterID: Int!, $partition: Int!, $metric: CharacterRankingMetricType!) {
   characterData {
     character(name: $name, serverSlug: $serverSlug, serverRegion: $serverRegion) {
-      encounterRankings(encounterID: $encounterID, partition: $partition, metric: dps, byBracket: true)
+      encounterRankings(encounterID: $encounterID, partition: $partition, metric: $metric, byBracket: true)
     }
   }
 }`;
@@ -409,19 +414,26 @@ export async function getCharacterProfile(
   // alongside the season-wide zoneRankings (both fetched together, always,
   // regardless of which mode the UI is currently in -- see LookupResult's
   // comment in lib/lookup.ts for why).
-  encounterID?: number
+  encounterID?: number,
+  // Healers get points_and_healing/hps instead of points_and_damage/dps --
+  // everyone else (dps, tank, or unknown) gets the damage-based pair, since
+  // a tank's Log value is still meant to reflect damage output, just
+  // without being ranked against the DPS pool (see lib/lookup.ts).
+  role?: Role | null
 ): Promise<CharacterProfile | null> {
+  const seasonMetric = role === "healer" ? "points_and_healing" : "points_and_damage";
+  const encounterMetric = role === "healer" ? "hps" : "dps";
   const [seasonData, encounterData] = await Promise.all([
     wclGraphQL<RawCharacterProfileData>(
       CHARACTER_PROFILE_QUERY,
-      { name, serverSlug, serverRegion, zoneID, partition },
+      { name, serverSlug, serverRegion, zoneID, partition, metric: seasonMetric },
       clientId,
       clientSecret
     ),
     encounterID != null
       ? wclGraphQL<RawEncounterProfileData>(
           ENCOUNTER_PROFILE_QUERY,
-          { name, serverSlug, serverRegion, encounterID, partition },
+          { name, serverSlug, serverRegion, encounterID, partition, metric: encounterMetric },
           clientId,
           clientSecret
         )

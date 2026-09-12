@@ -23,13 +23,21 @@ BINDING_NAME_QUEUEANALYZER_TOGGLE = "Show/export applicant names"
 ---activity. Strips the trailing "(Mythic Keystone)"-style parenthetical
 ---Blizzard appends to the activity name, to match WarcraftLogs' own plain
 ---dungeon names as closely as possible.
+---
+---C_LFGList.GetActiveEntryInfo() returns `activityIDs` (plural, an array --
+---confirmed against current API docs; the field used to be singular
+---`activityID` before patch 10.2.7/11.0.7, which is what this originally,
+---incorrectly, checked for and always got nil). GetActivityInfo() (singular
+---info, no "Table" suffix) is also deprecated and returns positional
+---values, not a table -- GetActivityInfoTable() is the current table-based
+---replacement and is what actually has a `.fullName` field.
 ---@return string|nil
 local function GetCurrentDungeonName()
 	local entry = C_LFGList.GetActiveEntryInfo()
-	if not entry or not entry.activityID then
+	if not entry or not entry.activityIDs or not entry.activityIDs[1] then
 		return nil
 	end
-	local activityInfo = C_LFGList.GetActivityInfo(entry.activityID)
+	local activityInfo = C_LFGList.GetActivityInfoTable(entry.activityIDs[1])
 	if not activityInfo or not activityInfo.fullName then
 		return nil
 	end
@@ -37,19 +45,24 @@ local function GetCurrentDungeonName()
 	return name ~= "" and name or nil
 end
 
----Collect Name, Server, Blizzard's own item level and Mythic+ rating for
----every member of every current applicant, as flat quadruplets (Name,
----Server, ItemLevel, Rating, repeating) -- C_LFGList.GetApplicantMemberInfo
----already returns itemLevel and dungeonScore (Blizzard's own in-game
----Mythic+ rating, the same number shown in the "Rating" column) in the very
----same call we use for the name, at zero extra cost -- no separate request,
----no network round trip. Name and Server are kept as separate fields
----(rather than one hyphenated "Name-Realm" string) so the webapp never has
----to guess a split point on a realm name. dungeonScore is a DIFFERENT
----number from raider.io's own score (two independently calculated ratings
----that happen to correlate closely, not the same value) -- the webapp uses
----it as a fast default and only calls raider.io itself if you explicitly
----ask it to.
+---Collect Name, Server, Blizzard's own item level, Mythic+ rating and
+---assigned role for every member of every current applicant, as flat
+---quintuplets (Name, Server, ItemLevel, Rating, Role, repeating) --
+---C_LFGList.GetApplicantMemberInfo already returns itemLevel, dungeonScore
+---(Blizzard's own in-game Mythic+ rating, the same number shown in the
+---"Rating" column) and assignedRole in the very same call we use for the
+---name, at zero extra cost -- no separate request, no network round trip.
+---assignedRole (not the tank/healer/damage boolean flags, which can all be
+---true at once for a flexible/multi-role application) is Blizzard's OWN
+---resolution of "which single role is this specific application actually
+---for" -- exactly the thing we'd otherwise have to guess at from a cached,
+---possibly-stale WCL spec lookup. Name and Server are kept as separate
+---fields (rather than one hyphenated "Name-Realm" string) so the webapp
+---never has to guess a split point on a realm name. dungeonScore is a
+---DIFFERENT number from raider.io's own score (two independently
+---calculated ratings that happen to correlate closely, not the same
+---value) -- the webapp uses it as a fast default and only calls raider.io
+---itself if you explicitly ask it to.
 ---@return string[] entries
 local function GetApplicantNames()
 	local entries = {}
@@ -62,7 +75,7 @@ local function GetApplicantNames()
 		local info = C_LFGList.GetApplicantInfo(applicantID)
 		if info then
 			for memberIdx = 1, info.numMembers do
-				local fullName, _, _, _, itemLevel, _, _, _, _, _, _, dungeonScore =
+				local fullName, _, _, _, itemLevel, _, _, _, _, assignedRole, _, dungeonScore =
 					C_LFGList.GetApplicantMemberInfo(applicantID, memberIdx)
 				if fullName then
 					local name, realm = strsplit("-", fullName)
@@ -73,6 +86,7 @@ local function GetApplicantNames()
 					table.insert(entries, realm)
 					table.insert(entries, tostring(math.floor((itemLevel or 0) + 0.5)))
 					table.insert(entries, tostring(math.floor((dungeonScore or 0) + 0.5)))
+					table.insert(entries, assignedRole or "")
 				end
 			end
 		end
@@ -149,7 +163,8 @@ local function ParseImportText(text)
 end
 
 -- Percentile color tiers, matching the webapp's percentileColor() exactly
--- (same hex values: orange/purple/blue/green/grey).
+-- (same hex values: orange/purple/blue/green/grey). Used for the LOG value
+-- specifically.
 local function PercentileColorCode(pct)
 	if pct >= 95 then
 		return "|cffff8000" -- orange
@@ -158,6 +173,27 @@ local function PercentileColorCode(pct)
 	elseif pct >= 50 then
 		return "|cff0070dd" -- blue
 	elseif pct >= 25 then
+		return "|cff1eff00" -- green
+	else
+		return "|cff9d9d9d" -- grey
+	end
+end
+
+-- Same 5 colors as PercentileColorCode, but keyed by absolute RANK
+-- POSITION (1st/2nd/3rd/4th, everything else grey) instead of a percentile
+-- value -- matching the webapp's rankColor(). A deliberately separate
+-- function: the rank digits used to be colored by the LOG percentile,
+-- which read as "these two numbers are the same thing" when they aren't.
+-- 0 (unranked -- tanks/healers) falls through to grey along with every
+-- rank past 4th.
+local function RankColorCode(rank)
+	if rank == 1 then
+		return "|cffff8000" -- orange
+	elseif rank == 2 then
+		return "|cffa335ee" -- purple
+	elseif rank == 3 then
+		return "|cff0070dd" -- blue
+	elseif rank == 4 then
 		return "|cff1eff00" -- green
 	else
 		return "|cff9d9d9d" -- grey
@@ -354,7 +390,7 @@ function QueueAnalyzer_RefreshExport()
 	local dungeonName = GetCurrentDungeonName() or ""
 
 	-- One flat ":"-delimited string
-	-- ("Name:Server:ItemLevel:Rating:Name:Server:ItemLevel:Rating:...:DungeonName:EXPORT")
+	-- ("Name:Server:ItemLevel:Rating:Role:Name:Server:ItemLevel:Rating:Role:...:DungeonName:EXPORT")
 	-- instead of separate lines -- easier to select/copy reliably as a
 	-- single line, and the webapp reads it back the same way (splits on
 	-- ":"; names/realms/dungeon names never contain ":"). The dungeon name
@@ -364,7 +400,7 @@ function QueueAnalyzer_RefreshExport()
 	-- per applicant, so it only needs to appear once; the webapp's
 	-- Season/Dungeon toggle needs a fixed position to read it from (see
 	-- lib/lookup.ts's parseClipboardText, which reads the LAST token before
-	-- EXPORT rather than assuming every group of 4 is a member). Truly
+	-- EXPORT rather than assuming every group of 5 is a member). Truly
 	-- empty (no dungeon AND no applicants) stays a genuinely empty string,
 	-- not a stray marker -- that showed up in the Export field on every
 	-- addon startup before any listing existed.
@@ -524,14 +560,19 @@ local function HookApplicantNamePrefix()
 			displayName = "  " .. displayName
 		end
 
+		-- Rank and Log each get their own color now (RankColorCode vs
+		-- PercentileColorCode) -- they used to share one color derived from
+		-- Log alone, which made two different numbers look like the same
+		-- value.
 		local prefix
 		if data.rank > 0 then
-			prefix = string.format("%02d:%02d:", data.rank, data.best)
+			prefix = RankColorCode(data.rank) .. string.format("%02d", data.rank) .. "|r:"
 		else
-			prefix = string.format("%02d:", data.best)
+			prefix = ""
 		end
+		prefix = prefix .. PercentileColorCode(data.best) .. string.format("%02d", data.best) .. "|r:"
 
-		member.Name:SetText(PercentileColorCode(data.best) .. prefix .. "|r" .. displayName)
+		member.Name:SetText(prefix .. displayName)
 	end)
 end
 
@@ -555,14 +596,17 @@ local function AddApplicationViewerButton()
 	panel.QueueAnalyzerButton = button
 end
 
--- Star icon for a top-5 rank, squeezed into the Role column's own leftover
+-- Star icon for a top-3 rank, squeezed into the Role column's own leftover
 -- space after whichever role icon is actually the rightmost visible one
 -- (applicants show 1-3 icons depending on which roles they're flexible
 -- for) -- anchored to that icon instead of a fixed x-offset so it adapts
 -- automatically instead of assuming a fixed icon count. A texture escape
 -- (|T...|t) inside the FontString, not a Unicode "★" character -- WoW's UI
 -- font doesn't reliably have that glyph, but any FontString can render an
--- arbitrary texture inline like this regardless of font.
+-- arbitrary texture inline like this regardless of font. Single star only
+-- (no more 1-5 tiered count -- repeating the texture escape via :rep()
+-- didn't render correctly in-game) -- one star is a clear enough marker on
+-- its own for "top 3".
 local STAR_ICON = "|TInterface\\Common\\FavoritesIcon:14:14|t"
 
 local function GetLastRoleIcon(member)
@@ -581,10 +625,14 @@ end
 -- Deliberately no header label and the smallest available font: LFGListFrame
 -- can't be resized (both corners are anchored, so SetWidth is a no-op --
 -- confirmed live), so this has zero room to spare.
---   1. After the last role icon: stars for the top 5 ranks -- 5 stars for
---      #1 down to 1 star for #5, none past that.
---   2. After iLvl: rank, anchored to member.ItemLevel.
---   3. After Rating: log, anchored to member.Rating the same way.
+--   1. After the last role icon: a single star for the top 4 ranks, none
+--      past that.
+--   2. After iLvl: rank (RankColorCode -- its own color, not the Log's),
+--      anchored to member.ItemLevel.
+--   3. After Rating: log (PercentileColorCode), anchored to member.Rating
+--      the same way. Tanks/healers still get a Log value here now (see
+--      lib/lookup.ts) -- they just never have a rank (data.rank stays 0),
+--      so only the Rating readout shows anything for them.
 local hookedApplicantReadouts = false
 local function HookApplicantReadouts()
 	if hookedApplicantReadouts or not LFGListApplicationViewer_UpdateApplicantMember then
@@ -628,14 +676,16 @@ local function HookApplicantReadouts()
 		-- icon is the rightmost visible one can change between applicants.
 		member.QueueAnalyzerStarReadout:ClearAllPoints()
 		member.QueueAnalyzerStarReadout:SetPoint("LEFT", GetLastRoleIcon(member), "RIGHT", 2, 0)
-		-- Rank 1 -> 5 stars, rank 2 -> 4, ... rank 5 -> 1, nothing past that.
-		local starCount = (data.rank >= 1 and data.rank <= 5) and (6 - data.rank) or 0
-		member.QueueAnalyzerStarReadout:SetText(STAR_ICON:rep(starCount))
+		-- One star for the top 4 ranks (matching the 4 colored rank tiers
+		-- below), nothing past that.
+		member.QueueAnalyzerStarReadout:SetText((data.rank >= 1 and data.rank <= 4) and STAR_ICON or "")
 
 		member.QueueAnalyzerIlvlReadout:ClearAllPoints()
 		member.QueueAnalyzerIlvlReadout:SetPoint("LEFT", member.ItemLevel, "RIGHT", 2, 0)
+		-- Rank gets its own color (RankColorCode) instead of the Log's
+		-- percentile color -- they used to look like the same value.
 		local rankText = data.rank > 0 and string.format("%02d", data.rank) or ""
-		member.QueueAnalyzerIlvlReadout:SetText(PercentileColorCode(data.best) .. rankText .. "|r")
+		member.QueueAnalyzerIlvlReadout:SetText(RankColorCode(data.rank) .. rankText .. "|r")
 
 		member.QueueAnalyzerRatingReadout:ClearAllPoints()
 		member.QueueAnalyzerRatingReadout:SetPoint("LEFT", member.Rating, "RIGHT", 2, 0)
