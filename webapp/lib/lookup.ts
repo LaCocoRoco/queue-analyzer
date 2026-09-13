@@ -17,13 +17,25 @@ export const REGION = process.env.NEXT_PUBLIC_WCL_REGION ?? "EU";
 // a short burst like this, neither is the binding constraint.
 const CONCURRENCY = 10;
 
-// Thrown for the two user-facing failure cases here, carrying a stable code
+// The addon version this webapp build was written against -- bump this
+// alongside QueueAnalyzer.toc's "## Version:" line whenever the clipboard
+// format changes in a way that breaks compatibility (like this one did).
+// Embedded in both directions: the addon's Export string ends in
+// "e<its own .toc version>" (checked against this constant below), and the
+// webapp's own Import string echoes this same value back as "i<version>"
+// for the addon to check against ITS OWN version (see Core.lua's
+// ParseImportText) -- so either side running a mismatched build gets a
+// clear "wrong version" error instead of silently misreading a format it
+// doesn't actually speak.
+export const EXPECTED_ADDON_VERSION = "0.3.0";
+
+// Thrown for the user-facing failure cases here, carrying a stable code
 // instead of a hardcoded-language message -- the UI maps the code to the
 // current locale's translation (see lib/i18n.ts). Anything else (actual WCL
 // API errors) is left as a plain Error and shown as-is; those come from a
 // third party and aren't worth translating.
 export class LookupError extends Error {
-  code: "NO_VALID_ENTRIES" | "CONFIG_INCOMPLETE";
+  code: "NO_VALID_ENTRIES" | "CONFIG_INCOMPLETE" | "WRONG_ADDON_VERSION";
   constructor(code: LookupError["code"]) {
     super(code);
     this.code = code;
@@ -130,13 +142,22 @@ function parseAssignedRole(raw: string): Role | null {
 // "Name-Realm" string -- avoids ever having to guess a split point on a
 // realm name (some contain non-ASCII/parenthesized parts).
 //
-// The trailing "EXPORT" marker is what toExportString below writes back as
-// "IMPORT" instead -- the two formats used to be similar enough in shape
-// that pasting the Export field straight back into itself got silently
-// accepted as real ranked data. An empty clipboard (nothing copied yet) is
-// not an error here -- runLookup's caller already surfaces "no names" for
-// that; this only rejects non-empty text that isn't actually the addon's
-// Export output.
+// The trailing "e<version>" marker is what toExportString below writes back
+// as "i<version>" instead -- the two formats used to be similar enough in
+// shape that pasting the Export field straight back into itself got
+// silently accepted as real ranked data. Only the embedded version's MAJOR
+// component has to match EXPECTED_ADDON_VERSION's -- minor/patch
+// differences are assumed backwards compatible, only a MAJOR mismatch means
+// this webapp build and the addon build actually disagree on the data
+// format, which is a LookupError (WRONG_ADDON_VERSION) so the button can
+// show a specific message instead of the generic clipboard-format one. An
+// empty clipboard (nothing copied yet) is not an error here -- runLookup's
+// caller already surfaces "no names" for that; this only rejects non-empty
+// text that isn't actually the addon's Export output.
+function majorVersion(version: string): string {
+  return version.split(".")[0];
+}
+
 export function parseClipboardText(rawText: string): {
   dungeonName: string | null;
   entries: { key: string; blizzardScore: number; blizzardItemLevel: number; addonRole: Role | null }[];
@@ -145,11 +166,15 @@ export function parseClipboardText(rawText: string): {
   if (trimmed === "") {
     return { dungeonName: null, entries: [] };
   }
-  if (!trimmed.endsWith(":EXPORT")) {
+  const markerMatch = /:e([^:]+)$/.exec(trimmed);
+  if (!markerMatch) {
     throw new Error("Clipboard doesn't look like the addon's Export field (Import result pasted by mistake?).");
   }
+  if (majorVersion(markerMatch[1]) !== majorVersion(EXPECTED_ADDON_VERSION)) {
+    throw new LookupError("WRONG_ADDON_VERSION");
+  }
 
-  const tokens = trimmed.slice(0, -":EXPORT".length).split(":");
+  const tokens = trimmed.slice(0, -markerMatch[0].length).split(":");
   const dungeonName = tokens[tokens.length - 1]?.trim() || null;
   const memberTokens = tokens.slice(0, -1);
 

@@ -4,6 +4,7 @@ import { useEffect, useState, type CSSProperties } from "react";
 import { clearCredentials, loadCredentials, saveCredentials, type WclCredentials } from "@/lib/credentials";
 import { detectLocale, DICTS, DEFAULT_LOCALE } from "@/lib/i18n";
 import {
+  EXPECTED_ADDON_VERSION,
   fetchRioScores,
   LookupError,
   parseClipboardText,
@@ -16,7 +17,7 @@ import {
 } from "@/lib/lookup";
 import { toServerSlug, validateCredentials } from "@/lib/wcl";
 
-// Flat ":"-delimited "MODE:Name-Realm:Best:Rank:Name-Realm:Best:Rank:...:IMPORT"
+// Flat ":"-delimited "MODE:Name-Realm:Best:Rank:Name-Realm:Best:Rank:...:i<version>"
 // -- the format the addon's import window parses (see Core.lua's
 // ParseImportText). A single line pastes far more reliably into WoW's
 // EditBox than a multi-line block. Safe because names/realms never contain
@@ -26,17 +27,19 @@ import { toServerSlug, validateCredentials } from "@/lib/wcl";
 // just 0 when Filter wasn't used for this export, which the addon reads as
 // "no rank to show". The leading MODE token ("TABLE" or "NAME") tells the
 // addon which of its two mutually-exclusive display styles to use -- see
-// the Table/Name toggle below. The trailing "IMPORT" marker lets the
+// the Table/Name toggle below. The trailing "i<version>" marker lets the
 // addon's ParseImportText tell this string apart from its OWN Export
 // string (which is a similar enough shape -- "stuff:Name-Realm:number:
-// number:...EXPORT" -- that pasting one into the other used to get
-// silently misread as real data instead of rejected).
+// number:...e<version>" -- that pasting one into the other used to get
+// silently misread as real data instead of rejected), AND lets it check
+// the version matches its own -- see EXPECTED_ADDON_VERSION's comment in
+// lib/lookup.ts.
 function toExportString(results: RankedResult[], displayMode: DisplayMode): string {
   const mode = displayMode === "name" ? "NAME" : "TABLE";
   const triplets = results
     .filter((r) => !r.error)
     .flatMap((r) => [r.key, Math.round(r.best).toString(), r.rank.toString()]);
-  return [mode, ...triplets, "IMPORT"].join(":");
+  return [mode, ...triplets, `i${EXPECTED_ADDON_VERSION}`].join(":");
 }
 
 // Standard WoW class colors (RAID_CLASS_COLORS), keyed by Blizzard's
@@ -168,6 +171,12 @@ export default function LookupForm() {
 
   const [buttonState, setButtonState] = useState<ButtonState>("idle");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  // Distinguishes a WRONG_ADDON_VERSION failure from any other error --
+  // unlike other errors (shown generically as just "Error", see the
+  // comment near the error-message <p> that used to sit here), this one is
+  // actually actionable ("update the addon"), so it gets its own specific
+  // button label instead of the generic one.
+  const [versionMismatch, setVersionMismatch] = useState(false);
 
   // Raw (unsorted) results from the last successful lookup -- kept around
   // purely so the Filter/Preview table below can re-rank live as the
@@ -274,6 +283,7 @@ export default function LookupForm() {
   async function handleReadFromClipboard() {
     if (!creds || buttonState === "loading") return;
     setErrorMessage(null);
+    setVersionMismatch(false);
 
     if (!navigator.clipboard?.readText || !navigator.clipboard?.writeText) {
       setErrorMessage(t.errorClipboardUnavailable);
@@ -337,28 +347,35 @@ export default function LookupForm() {
       // (confirmed against Blizzard's own LFGList.lua -- displayOrderID is
       // read-only), so re-sorting the export string wouldn't let the addon
       // re-sort its native window either -- it'd just make the string
-      // harder to match against what's on screen in-game. Rank is always
-      // computed now (still in original order, see withRanks), not just
-      // when Filter is on -- pure Logs ranking (ioWeight 0) when Filter is
-      // off, so applicants still get a rank in-game even without ever
-      // touching Filter.
+      // harder to match against what's on screen in-game. Rank always
+      // blends both weights now, Filter on or not -- Filter's only job is
+      // showing/hiding the weight sliders (see effectiveLogsWeight/
+      // effectiveIoWeight below), not gating whether Score factors into the
+      // rank at all; ignoring Score whenever Filter happened to be off was
+      // confusing (the Score column is always visible now, so it looking
+      // uninvolved in ranking read as broken). The Score slot is already
+      // resolved above regardless of Filter, so there's no "IO not ready
+      // yet" case to guard against here either.
       const rankedResults: RankedResult[] = withRanks(
         withEffectiveMode(finalResults, dungeonMode),
-        filterEnabled ? logsWeight : 100,
-        filterEnabled ? ioWeight : 0
+        logsWeight,
+        ioWeight
       );
       await navigator.clipboard.writeText(toExportString(rankedResults, displayMode));
 
       setButtonState("done");
       setTimeout(() => setButtonState("idle"), 1800);
     } catch (err) {
-      const message =
-        err instanceof LookupError
+      const isWrongVersion = err instanceof LookupError && err.code === "WRONG_ADDON_VERSION";
+      const message = isWrongVersion
+        ? t.wrongAddonVersion
+        : err instanceof LookupError
           ? err.code === "NO_VALID_ENTRIES"
             ? t.noValidEntries
             : t.configIncomplete
           : (err as Error).message;
       setErrorMessage(message);
+      setVersionMismatch(isWrongVersion);
       setButtonState("error");
       setTimeout(() => setButtonState("idle"), 2500);
     }
@@ -434,14 +451,15 @@ export default function LookupForm() {
   // waits on rioLoaded (the actual data being ready), not on the Filter
   // toggle.
   const showIoColumn = rioLoaded;
-  // Rank/weighting: still Filter's actual job -- a rank is always shown,
-  // but it only blends in the Score (via the weight sliders) once Filter
-  // is on AND raider.io data has arrived; using the real ioWeight before
-  // rioLoaded would rank everyone as if their IO score were 0, a confusing
-  // order that's about to jump around the moment the fetch finishes.
-  const useWeightedRanking = filterEnabled && rioLoaded;
-  const effectiveLogsWeight = useWeightedRanking ? logsWeight : 100;
-  const effectiveIoWeight = useWeightedRanking ? ioWeight : 0;
+  // Rank/weighting: always blends both, Filter on or not -- Filter's only
+  // job is showing/hiding the weight sliders, not gating whether Score
+  // factors into the rank (see the comment where this same pair is used in
+  // handleReadFromClipboard for why). Still waits on rioLoaded specifically
+  // -- using the real ioWeight before the Score slot is actually populated
+  // would rank everyone as if their IO score were 0, a confusing order
+  // that's about to jump around the moment the fetch finishes.
+  const effectiveLogsWeight = rioLoaded ? logsWeight : 100;
+  const effectiveIoWeight = rioLoaded ? ioWeight : 0;
   // Unranked (tanks/healers, rank 0) always sort to the end, after every
   // real rank -- "erscheinen am Ende der Tabelle ohne Rang".
   const displayRows = results
@@ -493,7 +511,8 @@ export default function LookupForm() {
           {t.buttonLoading}
         </span>
         <span style={buttonLabelStyle(buttonState === "done")}>{t.buttonDone}</span>
-        <span style={buttonLabelStyle(buttonState === "error")}>{t.buttonErrorRetry}</span>
+        <span style={buttonLabelStyle(buttonState === "error" && !versionMismatch)}>{t.buttonErrorRetry}</span>
+        <span style={buttonLabelStyle(buttonState === "error" && versionMismatch)}>{t.buttonWrongVersion}</span>
       </button>
 
       {/* No inline error message shown here on purpose -- a <p> that only

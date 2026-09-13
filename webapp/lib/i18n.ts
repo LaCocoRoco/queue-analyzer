@@ -26,10 +26,12 @@ export interface Dict {
   buttonLoading: string;
   buttonDone: string;
   buttonErrorRetry: string;
+  buttonWrongVersion: string;
   errorClipboardUnavailable: string;
   errorNoNames: string;
   noValidEntries: string;
   configIncomplete: string;
+  wrongAddonVersion: string;
 }
 
 const en: Dict = {
@@ -43,14 +45,16 @@ const en: Dict = {
   savingButton: "Checking...",
   validationEmptyError: "Please enter Client ID and Secret.",
   logoutButton: "Logout",
-  buttonIdle: "Import",
+  buttonIdle: "Import from Clipboard",
   buttonLoading: "Analyze...",
-  buttonDone: "Export",
+  buttonDone: "Saved to Clipboard",
   buttonErrorRetry: "Error",
+  buttonWrongVersion: "Update Add-on!",
   errorClipboardUnavailable: "Clipboard access unavailable (needs HTTPS or localhost).",
   errorNoNames: "Clipboard contains no names.",
   noValidEntries: 'No valid "Name-Realm" entries found.',
   configIncomplete: "Configuration incomplete: WCL zone ID/partition not set.",
+  wrongAddonVersion: "This webapp expects a different addon version. Please update the addon.",
 };
 
 const de: Dict = {
@@ -64,14 +68,16 @@ const de: Dict = {
   savingButton: "Prüfe...",
   validationEmptyError: "Bitte Client ID und Secret eingeben.",
   logoutButton: "Ausloggen",
-  buttonIdle: "Import",
+  buttonIdle: "Aus Zwischenablage importieren",
   buttonLoading: "Analysiere...",
-  buttonDone: "Export",
+  buttonDone: "In Zwischenablage gespeichert",
   buttonErrorRetry: "Fehler",
+  buttonWrongVersion: "Addon aktualisieren!",
   errorClipboardUnavailable: "Zwischenablage-Zugriff nicht verfügbar (braucht HTTPS oder localhost).",
   errorNoNames: "Zwischenablage enthält keine Namen.",
   noValidEntries: 'Keine gültigen "Name-Realm"-Einträge gefunden.',
   configIncomplete: "Konfiguration unvollständig: WCL Zone-ID/Partition nicht gesetzt.",
+  wrongAddonVersion: "Diese Webapp erwartet eine andere Addon-Version. Bitte Addon aktualisieren.",
 };
 
 const fr: Dict = {
@@ -85,14 +91,16 @@ const fr: Dict = {
   savingButton: "Vérification...",
   validationEmptyError: "Merci de saisir le Client ID et le Secret.",
   logoutButton: "Déconnexion",
-  buttonIdle: "Importer",
+  buttonIdle: "Importer du presse-papiers",
   buttonLoading: "Analyse...",
-  buttonDone: "Exporter",
+  buttonDone: "Enregistré dans le presse-papiers",
   buttonErrorRetry: "Erreur",
+  buttonWrongVersion: "Mettre à jour l'addon !",
   errorClipboardUnavailable: "Accès au presse-papiers indisponible (HTTPS ou localhost requis).",
   errorNoNames: "Le presse-papiers ne contient aucun nom.",
   noValidEntries: 'Aucune entrée "Nom-Royaume" valide trouvée.',
   configIncomplete: "Configuration incomplète : Zone ID/Partition WCL non définies.",
+  wrongAddonVersion: "Cette application attend une version différente de l'addon. Merci de mettre à jour l'addon.",
 };
 
 const es: Dict = {
@@ -106,14 +114,16 @@ const es: Dict = {
   savingButton: "Comprobando...",
   validationEmptyError: "Introduce el Client ID y el Secret.",
   logoutButton: "Cerrar sesión",
-  buttonIdle: "Importar",
+  buttonIdle: "Importar del portapapeles",
   buttonLoading: "Analizando...",
-  buttonDone: "Exportar",
+  buttonDone: "Guardado en el portapapeles",
   buttonErrorRetry: "Error",
+  buttonWrongVersion: "¡Actualiza el addon!",
   errorClipboardUnavailable: "Acceso al portapapeles no disponible (requiere HTTPS o localhost).",
   errorNoNames: "El portapapeles no contiene nombres.",
   noValidEntries: 'No se encontraron entradas "Nombre-Reino" válidas.',
   configIncomplete: "Configuración incompleta: Zone ID/Partition de WCL no definidos.",
+  wrongAddonVersion: "Esta aplicación espera una versión diferente del addon. Actualiza el addon.",
 };
 
 const it: Dict = {
@@ -127,14 +137,16 @@ const it: Dict = {
   savingButton: "Verifica...",
   validationEmptyError: "Inserisci Client ID e Secret.",
   logoutButton: "Disconnetti",
-  buttonIdle: "Importa",
+  buttonIdle: "Importa dagli appunti",
   buttonLoading: "Analisi...",
-  buttonDone: "Esporta",
+  buttonDone: "Salvato negli appunti",
   buttonErrorRetry: "Errore",
+  buttonWrongVersion: "Aggiorna l'addon!",
   errorClipboardUnavailable: "Accesso agli appunti non disponibile (richiede HTTPS o localhost).",
   errorNoNames: "Gli appunti non contengono nomi.",
   noValidEntries: 'Nessuna voce "Nome-Reame" valida trovata.',
   configIncomplete: "Configurazione incompleta: Zone ID/Partition WCL non impostati.",
+  wrongAddonVersion: "Questa app si aspetta una versione diversa dell'addon. Aggiorna l'addon.",
 };
 
 const ru: Dict = {
@@ -148,14 +160,16 @@ const ru: Dict = {
   savingButton: "Проверка...",
   validationEmptyError: "Введите Client ID и Secret.",
   logoutButton: "Выйти",
-  buttonIdle: "Импорт",
+  buttonIdle: "Импорт из буфера обмена",
   buttonLoading: "Анализ...",
-  buttonDone: "Экспорт",
+  buttonDone: "Сохранено в буфер обмена",
   buttonErrorRetry: "Ошибка",
+  buttonWrongVersion: "Обновите аддон!",
   errorClipboardUnavailable: "Доступ к буферу обмена недоступен (нужен HTTPS или localhost).",
   errorNoNames: "В буфере обмена нет имён.",
   noValidEntries: 'Не найдено допустимых записей "Имя-Сервер".',
   configIncomplete: "Неполная конфигурация: Zone ID/Partition WCL не заданы.",
+  wrongAddonVersion: "Это веб-приложение ожидает другую версию аддона. Пожалуйста, обновите аддон.",
 };
 
 export const DICTS: Record<Locale, Dict> = { en, de, fr, es, it, ru };

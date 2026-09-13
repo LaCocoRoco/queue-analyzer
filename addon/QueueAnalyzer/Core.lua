@@ -16,6 +16,31 @@
 BINDING_HEADER_QUEUEANALYZER = "Queue Analyzer"
 BINDING_NAME_QUEUEANALYZER_TOGGLE = "Show/export applicant names"
 
+-- Read once from our own .toc's "## Version:" line -- the single source of
+-- truth for the addon's version, used both in the Export marker (so the
+-- webapp can tell whether it's talking to the addon version it expects)
+-- and to validate the Import marker the webapp sends back (see
+-- ParseImportText) -- the webapp hardcodes this same version string as
+-- what it currently targets, so a mismatch in either direction means one
+-- side is stale.
+local ADDON_VERSION = C_AddOns.GetAddOnMetadata("QueueAnalyzer", "Version") or "0.0.0"
+
+-- Only the MAJOR component of a "MAJOR.MINOR.PATCH" version string matters
+-- for addon<->webapp compatibility (see ParseImportText/QueueAnalyzer_RefreshExport)
+-- -- Minor/patch bumps are assumed backwards compatible, only a MAJOR
+-- change means the two sides actually disagree on the data format.
+local function MajorVersion(version)
+	return version:match("^(%d+)") or version
+end
+
+StaticPopupDialogs["QUEUEANALYZER_WRONG_VERSION"] = {
+	text = "Falsche Version. Bitte Addon aktualisieren.",
+	button1 = OKAY,
+	timeout = 0,
+	whileDead = true,
+	hideOnEscape = true,
+}
+
 ---Returns the display name of the Mythic Keystone dungeon for your own
 ---current Group Finder listing (used by the webapp's Season/Dungeon toggle
 ---to look up dungeon-specific WarcraftLogs data instead of whole-season
@@ -115,20 +140,25 @@ QueueAnalyzerDisplayMode = "table"
 ---Parse the webapp's flat ":"-delimited import string into a lookup table
 ---plus the requested display mode (see LookupForm.tsx's toExportString).
 ---An optional leading "TABLE" or "NAME" token selects the mode; everything
----after it (up to the trailing "IMPORT" marker) is the usual
+---after it (up to the trailing "i<version>" marker) is the usual
 ---"Name-Realm:Best:Rank" triplets. Safe to split the whole string on ":"
 ---since names/realms never contain one; rank is 0, not omitted, when the
 ---webapp had no rank for an entry, so the triplet stride never has to
 ---guess.
 ---
----Requires the string to END in "IMPORT" (see toExportString on the webapp
----side) -- this addon's OWN Export string ends in "EXPORT" instead and is
----otherwise the same shape (leading token + "Name-Realm:number:number"
----triplets), so without this check, pasting the Export field's own content
----back into Import here used to get silently accepted as if it were real
----ranked results, reading Rating/ItemLevel as Best/Rank. Returns nil data
----and an error message instead in that case (or if the string is empty/
----junk), rather than guessing.
+---Requires the string to END in "i<version>" (see toExportString on the
+---webapp side, and ADDON_VERSION's comment) -- this addon's OWN Export
+---string ends in "e<version>" instead and is otherwise the same shape
+---(leading token + "Name-Realm:number:number" triplets), so without this
+---check, pasting the Export field's own content back into Import here used
+---to get silently accepted as if it were real ranked results, reading
+---Rating/ItemLevel as Best/Rank. Only the MAJOR component of the embedded
+---version has to match this addon's own ADDON_VERSION's major -- Minor/
+---patch differences are assumed backwards compatible (nothing about the
+---data format itself changed), only a MAJOR bump means the webapp build
+---and this addon build actually disagree on the format, which silently
+---misreading as valid would be worse than refusing outright. Returns nil
+---data and an error message in either failure case, rather than guessing.
 ---@param text string
 ---@return table<string, {best: number, rank: number}>|nil, string|nil, string|nil errorMessage
 local function ParseImportText(text)
@@ -138,8 +168,13 @@ local function ParseImportText(text)
 		table.insert(tokens, token)
 	end
 
-	if #tokens == 0 or tokens[#tokens] ~= "IMPORT" then
+	local marker = tokens[#tokens]
+	local importVersion = marker and marker:match("^i(.+)$")
+	if not importVersion then
 		return nil, nil, "Not an Import result (paste the webapp's output, not the Export field)."
+	end
+	if MajorVersion(importVersion) ~= MajorVersion(ADDON_VERSION) then
+		return nil, nil, "Wrong version. Please update the addon.", true
 	end
 	table.remove(tokens) -- drop the trailing marker, not part of the data itself
 
@@ -173,27 +208,6 @@ local function PercentileColorCode(pct)
 	elseif pct >= 50 then
 		return "|cff0070dd" -- blue
 	elseif pct >= 25 then
-		return "|cff1eff00" -- green
-	else
-		return "|cff9d9d9d" -- grey
-	end
-end
-
--- Same 5 colors as PercentileColorCode, but keyed by absolute RANK
--- POSITION (1st/2nd/3rd/4th, everything else grey) instead of a percentile
--- value -- matching the webapp's rankColor(). A deliberately separate
--- function: the rank digits used to be colored by the LOG percentile,
--- which read as "these two numbers are the same thing" when they aren't.
--- 0 (unranked -- tanks/healers) falls through to grey along with every
--- rank past 4th.
-local function RankColorCode(rank)
-	if rank == 1 then
-		return "|cffff8000" -- orange
-	elseif rank == 2 then
-		return "|cffa335ee" -- purple
-	elseif rank == 3 then
-		return "|cff0070dd" -- blue
-	elseif rank == 4 then
 		return "|cff1eff00" -- green
 	else
 		return "|cff9d9d9d" -- grey
@@ -357,9 +371,12 @@ local function CreateQueueAnalyzerFrame()
 	importButton:SetSize(74, 22)
 	importButton:SetPoint("LEFT", importBox, "RIGHT", 8, 0)
 	importButton:SetScript("OnClick", function()
-		local data, mode, errorMessage = ParseImportText(f.importBox:GetText())
+		local data, mode, errorMessage, isVersionMismatch = ParseImportText(f.importBox:GetText())
 		if errorMessage then
 			f.status:SetText(errorMessage)
+			if isVersionMismatch then
+				StaticPopup_Show("QUEUEANALYZER_WRONG_VERSION")
+			end
 			return
 		end
 		local count = 0
@@ -390,31 +407,34 @@ function QueueAnalyzer_RefreshExport()
 	local dungeonName = GetCurrentDungeonName() or ""
 
 	-- One flat ":"-delimited string
-	-- ("Name:Server:ItemLevel:Rating:Role:Name:Server:ItemLevel:Rating:Role:...:DungeonName:EXPORT")
+	-- ("Name:Server:ItemLevel:Rating:Role:Name:Server:ItemLevel:Rating:Role:...:DungeonName:e<version>")
 	-- instead of separate lines -- easier to select/copy reliably as a
 	-- single line, and the webapp reads it back the same way (splits on
 	-- ":"; names/realms/dungeon names never contain ":"). The dungeon name
-	-- is always the LAST field before the EXPORT marker when there's
-	-- anything at all to export, even if it's itself empty (no active
-	-- Keystone listing) -- it's a single value for the whole listing, not
-	-- per applicant, so it only needs to appear once; the webapp's
+	-- is always the LAST field before the marker when there's anything at
+	-- all to export, even if it's itself empty (no active Keystone
+	-- listing) -- it's a single value for the whole listing, not per
+	-- applicant, so it only needs to appear once; the webapp's
 	-- Season/Dungeon toggle needs a fixed position to read it from (see
 	-- lib/lookup.ts's parseClipboardText, which reads the LAST token before
-	-- EXPORT rather than assuming every group of 5 is a member). Truly
+	-- the marker rather than assuming every group of 5 is a member). Truly
 	-- empty (no dungeon AND no applicants) stays a genuinely empty string,
 	-- not a stray marker -- that showed up in the Export field on every
 	-- addon startup before any listing existed.
 	--
-	-- The trailing "EXPORT" token is a self-identifying marker: this
-	-- string's own shape ("Name:Server:number:number:...") is close enough
-	-- to the webapp's Import string's shape that pasting THIS straight back
-	-- into the Import box below used to get silently "parsed" as if it were
-	-- real ranked results (confirmed live -- rating/item level got read as
+	-- The trailing "e<version>" token (ADDON_VERSION -- see its own comment)
+	-- is a self-identifying, self-versioning marker: this string's own
+	-- shape ("Name:Server:number:number:...") is close enough to the
+	-- webapp's Import string's shape that pasting THIS straight back into
+	-- the Import box below used to get silently "parsed" as if it were real
+	-- ranked results (confirmed live -- rating/item level got read as
 	-- best/rank). ParseImportText now refuses anything that doesn't end in
-	-- "IMPORT" instead of guessing.
+	-- "i<version>" instead of guessing, AND refuses a version that doesn't
+	-- match this addon's own -- the webapp encodes which addon version it
+	-- was built against the same way.
 	local text = ""
 	if dungeonName ~= "" or #entries > 0 then
-		text = table.concat(entries, ":") .. ":" .. dungeonName .. ":EXPORT"
+		text = table.concat(entries, ":") .. ":" .. dungeonName .. ":e" .. ADDON_VERSION
 	end
 
 	frame.exportBox:SetText(text)
@@ -560,17 +580,10 @@ local function HookApplicantNamePrefix()
 			displayName = "  " .. displayName
 		end
 
-		-- Rank and Log each get their own color now (RankColorCode vs
-		-- PercentileColorCode) -- they used to share one color derived from
-		-- Log alone, which made two different numbers look like the same
-		-- value.
-		local prefix
-		if data.rank > 0 then
-			prefix = RankColorCode(data.rank) .. string.format("%02d", data.rank) .. "|r:"
-		else
-			prefix = ""
-		end
-		prefix = prefix .. PercentileColorCode(data.best) .. string.format("%02d", data.best) .. "|r:"
+		-- Rank number removed -- the star (see HookApplicantReadouts) is
+		-- considered marker enough for a top applicant now. Just the Log
+		-- value, in its own percentile color.
+		local prefix = PercentileColorCode(data.best) .. string.format("%02d", data.best) .. "|r:"
 
 		member.Name:SetText(prefix .. displayName)
 	end)
@@ -596,18 +609,39 @@ local function AddApplicationViewerButton()
 	panel.QueueAnalyzerButton = button
 end
 
--- Star icon for a top-3 rank, squeezed into the Role column's own leftover
+-- Star icon for a top-4 rank, squeezed into the Role column's own leftover
 -- space after whichever role icon is actually the rightmost visible one
 -- (applicants show 1-3 icons depending on which roles they're flexible
 -- for) -- anchored to that icon instead of a fixed x-offset so it adapts
 -- automatically instead of assuming a fixed icon count. A texture escape
 -- (|T...|t) inside the FontString, not a Unicode "★" character -- WoW's UI
 -- font doesn't reliably have that glyph, but any FontString can render an
--- arbitrary texture inline like this regardless of font. Single star only
--- (no more 1-5 tiered count -- repeating the texture escape via :rep()
--- didn't render correctly in-game) -- one star is a clear enough marker on
--- its own for "top 3".
-local STAR_ICON = "|TInterface\\Common\\FavoritesIcon:14:14|t"
+-- arbitrary texture inline like this regardless of font. Single star, not
+-- a repeated-count tier (repeating the texture escape via :rep() didn't
+-- render correctly in-game) -- tinted per rank instead, using the escape's
+-- own trailing r:g:b vertex-color parameters (confirmed supported: WoW's
+-- texture escape syntax is |Tpath:height:width:xofs:yofs:texW:texH:left:
+-- right:top:bottom:r:g:b|t -- texW/texH/left/right/top/bottom are just set
+-- to span the whole source image here, no actual cropping). Same 4 colors
+-- as the webapp's rankColor(), since this replaces the rank NUMBER as the
+-- in-game "top applicant" marker -- rank is no longer shown as text at all
+-- anywhere in-game (see HookApplicantNamePrefix and HookApplicantReadouts
+-- below).
+local function StarIcon(rank)
+	local r, g, b
+	if rank == 1 then
+		r, g, b = 255, 128, 0 -- orange
+	elseif rank == 2 then
+		r, g, b = 163, 53, 238 -- purple
+	elseif rank == 3 then
+		r, g, b = 0, 112, 221 -- blue
+	elseif rank == 4 then
+		r, g, b = 30, 255, 0 -- green
+	else
+		return ""
+	end
+	return string.format("|TInterface\\Common\\FavoritesIcon:14:14:0:0:16:16:0:16:0:16:%d:%d:%d|t", r, g, b)
+end
 
 local function GetLastRoleIcon(member)
 	if member.RoleIcon3:IsShown() then
@@ -619,20 +653,19 @@ local function GetLastRoleIcon(member)
 	return member.RoleIcon1
 end
 
--- "Table" mode: three small readouts -- the alternative to the name-prefix
+-- "Table" mode: two small readouts -- the alternative to the name-prefix
 -- approach above (HookApplicantNamePrefix), never both at once (see
 -- QueueAnalyzerDisplayMode, set from the webapp's Table/Name toggle).
 -- Deliberately no header label and the smallest available font: LFGListFrame
 -- can't be resized (both corners are anchored, so SetWidth is a no-op --
 -- confirmed live), so this has zero room to spare.
---   1. After the last role icon: a single star for the top 4 ranks, none
---      past that.
---   2. After iLvl: rank (RankColorCode -- its own color, not the Log's),
---      anchored to member.ItemLevel.
---   3. After Rating: log (PercentileColorCode), anchored to member.Rating
---      the same way. Tanks/healers still get a Log value here now (see
---      lib/lookup.ts) -- they just never have a rank (data.rank stays 0),
---      so only the Rating readout shows anything for them.
+--   1. After the last role icon: a single colored star for the top 4
+--      ranks, none past that -- no rank NUMBER anywhere in-game anymore,
+--      the star alone is the "good applicant" marker (see StarIcon).
+--   2. After Rating: log (PercentileColorCode), anchored to member.Rating.
+--      Tanks/healers still get a Log value here now (see lib/lookup.ts) --
+--      they just never have a rank (data.rank stays 0), so they still get
+--      a Log readout, just never a star.
 local hookedApplicantReadouts = false
 local function HookApplicantReadouts()
 	if hookedApplicantReadouts or not LFGListApplicationViewer_UpdateApplicantMember then
@@ -658,16 +691,12 @@ local function HookApplicantReadouts()
 		if not member.QueueAnalyzerStarReadout then
 			member.QueueAnalyzerStarReadout = member:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
 		end
-		if not member.QueueAnalyzerIlvlReadout then
-			member.QueueAnalyzerIlvlReadout = member:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-		end
 		if not member.QueueAnalyzerRatingReadout then
 			member.QueueAnalyzerRatingReadout = member:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
 		end
 
 		if not data then
 			member.QueueAnalyzerStarReadout:SetText("")
-			member.QueueAnalyzerIlvlReadout:SetText("")
 			member.QueueAnalyzerRatingReadout:SetText("")
 			return
 		end
@@ -676,16 +705,7 @@ local function HookApplicantReadouts()
 		-- icon is the rightmost visible one can change between applicants.
 		member.QueueAnalyzerStarReadout:ClearAllPoints()
 		member.QueueAnalyzerStarReadout:SetPoint("LEFT", GetLastRoleIcon(member), "RIGHT", 2, 0)
-		-- One star for the top 4 ranks (matching the 4 colored rank tiers
-		-- below), nothing past that.
-		member.QueueAnalyzerStarReadout:SetText((data.rank >= 1 and data.rank <= 4) and STAR_ICON or "")
-
-		member.QueueAnalyzerIlvlReadout:ClearAllPoints()
-		member.QueueAnalyzerIlvlReadout:SetPoint("LEFT", member.ItemLevel, "RIGHT", 2, 0)
-		-- Rank gets its own color (RankColorCode) instead of the Log's
-		-- percentile color -- they used to look like the same value.
-		local rankText = data.rank > 0 and string.format("%02d", data.rank) or ""
-		member.QueueAnalyzerIlvlReadout:SetText(RankColorCode(data.rank) .. rankText .. "|r")
+		member.QueueAnalyzerStarReadout:SetText(StarIcon(data.rank))
 
 		member.QueueAnalyzerRatingReadout:ClearAllPoints()
 		member.QueueAnalyzerRatingReadout:SetPoint("LEFT", member.Rating, "RIGHT", 2, 0)
