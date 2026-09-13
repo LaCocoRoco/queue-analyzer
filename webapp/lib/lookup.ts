@@ -378,11 +378,21 @@ export interface ScoredResult extends EffectiveResult {
   score: number;
 }
 
+// Score (raider.io or Blizzard's in-game rating) is normalized against this
+// fixed absolute scale, not min-max'd across the current applicant batch --
+// confirmed live that min-max was the actual bug behind "unranked stayed
+// ranked": a batch where every applicant's score already sits close together
+// (e.g. 2535-2588) got stretched to fill the WHOLE 0-100 range regardless,
+// so a trivial real difference in Score could swamp a huge, meaningful
+// difference in Log (like 0 vs 37). A fixed ceiling keeps a tight cluster of
+// real scores mapping to a correspondingly tight cluster of ioNorm, so Log
+// isn't drowned out by noise. 4000 is comfortably above what the current
+// Mythic+ scoring curve produces for a realistic top-end player; clamped to
+// 100 in case a future season's scores creep past it anyway.
+const IO_SCORE_CEILING = 4000;
+
 // Combines WCL's Best percentile (already 0-100) with raider.io's Mythic+
 // score into one weighted value, for the optional "Filter" ranking mode.
-// The raw IO score (e.g. 1800-3000) isn't on the same 0-100 scale as a WCL
-// percentile, so it's min-max normalized across the current batch first
-// (lowest applicant -> 0, highest -> 100) before weighting.
 // logsWeight/ioWeight are two independent 0-100 sliders, not required to
 // sum to 100 -- dividing by their sum means e.g. both at 50 is a plain
 // average of the two normalized scores, matching what "50/50" should mean.
@@ -390,14 +400,11 @@ export interface ScoredResult extends EffectiveResult {
 // rather than being skipped or given a free-pass average -- an unknown
 // score shouldn't rank the same as a verified middling one.
 export function rankResults(results: EffectiveResult[], logsWeight: number, ioWeight: number): ScoredResult[] {
-  const withIo = results.filter((r) => r.ioScore > 0);
-  const ioMin = withIo.length ? Math.min(...withIo.map((r) => r.ioScore)) : 0;
-  const ioMax = withIo.length ? Math.max(...withIo.map((r) => r.ioScore)) : 0;
   const totalWeight = logsWeight + ioWeight;
 
   const scored: ScoredResult[] = results.map((r) => {
     const logsNorm = r.best;
-    const ioNorm = r.ioScore <= 0 ? 0 : ioMax > ioMin ? ((r.ioScore - ioMin) / (ioMax - ioMin)) * 100 : 50;
+    const ioNorm = r.ioScore <= 0 ? 0 : Math.min(100, (r.ioScore / IO_SCORE_CEILING) * 100);
     const score = totalWeight > 0 ? (logsWeight * logsNorm + ioWeight * ioNorm) / totalWeight : 0;
     return { ...r, score };
   });

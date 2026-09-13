@@ -94,10 +94,31 @@ function wclCharacterUrl(name: string, realm: string): string {
 
 // Zero-padded to 2 digits (#1 -> #01) -- purely cosmetic, requested as a
 // quick visual test; ranks past 99 just keep their natural width. 0 (tanks/
-// healers -- see withRanks) isn't a real rank at all, shown as "-" instead
-// of the misleading "#00".
+// healers -- see withRanks) isn't a real rank at all -- callers show a
+// RoleIcon instead for those two roles, and this "-" only as the leftover
+// fallback for anything else unranked.
 function formatRank(rank: number): string {
   return rank > 0 ? `#${String(rank).padStart(2, "0")}` : "-";
+}
+
+// Shield (tank) / cross (healer) glyphs, shown in the Rank column instead of
+// the misleading "-" for the two roles withRanks always gives rank 0 (they
+// were never in the ranking pool to begin with, so "unranked" reads as
+// broken there -- these make it read as "this role doesn't rank" instead).
+// `color` is a parameter (not hardcoded) purely so callers can pick, but the
+// Rank column itself always passes pure white, matching the original SVGs
+// as designed.
+function RoleIcon({ role, color, size = 15 }: { role: "tank" | "healer"; color: string; size?: number }) {
+  const path =
+    role === "tank"
+      ? "M 50,26 C 60,26 70,23 70,23 V 46 C 70,62 50,74 50,74 C 50,74 30,62 30,46 V 23 C 30,23 40,26 50,26 Z"
+      : "M 42,26 H 58 V 42 H 74 V 58 H 58 V 74 H 42 V 58 H 26 V 42 H 42 Z";
+  return (
+    <svg viewBox="0 0 100 100" width={size} height={size} style={{ display: "block", marginLeft: "auto" }}>
+      <circle cx="50" cy="50" r="44" fill="none" stroke={color} strokeWidth={6} />
+      <path d={path} fill={color} />
+    </svg>
+  );
 }
 
 // Copies Blizzard's own in-game Mythic+ rating (blizzardScore, sent by the
@@ -168,6 +189,15 @@ export default function LookupForm() {
   const [clientSecretInput, setClientSecretInput] = useState("");
   const [validating, setValidating] = useState(false);
   const [validationError, setValidationError] = useState<string | null>(null);
+  // Set when handleReadFromClipboard's own upfront credential check (not
+  // the onboarding Save button's) fails -- an expired/revoked Client
+  // Secret otherwise made every single character's WCL lookup fail
+  // independently (each one caught inside lookupOne and reduced to "no
+  // data"), which just read as "the Log column is empty" with no
+  // indication why. Shown on the onboarding screen after logging the user
+  // back out, in the same slot validationError uses for a freshly-typed
+  // bad pair.
+  const [loggedOutReason, setLoggedOutReason] = useState<string | null>(null);
 
   const [buttonState, setButtonState] = useState<ButtonState>("idle");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -210,6 +240,14 @@ export default function LookupForm() {
   const [rioLoaded, setRioLoaded] = useState(false);
   const [rioLoading, setRioLoading] = useState(false);
 
+  // The addon's raw Export string as last read from the clipboard, kept
+  // around purely so "Source" (below) can write it back -- Import
+  // immediately overwrites the clipboard with its own computed result,
+  // which otherwise loses the original input and makes re-checking what was
+  // actually pasted (troubleshooting a weird result) impossible without
+  // re-copying from the addon again.
+  const [lastSourceText, setLastSourceText] = useState<string | null>(null);
+
   useEffect(() => {
     setLocale(detectLocale());
     loadCredentials()
@@ -249,6 +287,7 @@ export default function LookupForm() {
 
   async function handleSaveCredentials() {
     setValidationError(null);
+    setLoggedOutReason(null);
     const clientId = clientIdInput.trim();
     const clientSecret = clientSecretInput.trim();
     if (!clientId || !clientSecret) {
@@ -273,11 +312,17 @@ export default function LookupForm() {
     setResults(null);
   }
 
+  async function handleCopySource() {
+    if (!lastSourceText) return;
+    await navigator.clipboard.writeText(lastSourceText);
+  }
+
   async function handleResetCredentials() {
     await clearCredentials();
     setCreds(null);
     setClientIdInput("");
     setClientSecretInput("");
+    setLastSourceText(null);
   }
 
   async function handleReadFromClipboard() {
@@ -293,8 +338,27 @@ export default function LookupForm() {
     }
 
     setButtonState("loading");
+
+    // Checked explicitly, upfront, separately from the try/catch below --
+    // see loggedOutReason's comment for why. Confirmed live: WCL's token
+    // endpoint doesn't count against the points/rate-limit budget (only
+    // GraphQL queries do), so re-checking here on every single Import
+    // click costs nothing.
+    try {
+      await validateCredentials(creds.clientId, creds.clientSecret);
+    } catch {
+      await clearCredentials();
+      setCreds(null);
+      setLoggedOutReason(t.apiKeyInvalid);
+      setButtonState("idle");
+      return;
+    }
     try {
       const rawText = await navigator.clipboard.readText();
+      // Stashed before parsing even attempts -- if parseClipboardText below
+      // throws (wrong version, garbage clipboard, etc.), Source should still
+      // be able to hand back exactly what was actually read.
+      setLastSourceText(rawText);
       // The addon exports "DungeonName:Name-Realm:Rating:ItemLevel:..." now
       // -- DungeonName is the leader's current Keystone dungeon (empty if
       // none), Rating/ItemLevel are Blizzard's own in-game values (see
@@ -440,6 +504,7 @@ export default function LookupForm() {
             {validating ? t.savingButton : t.saveButton}
           </button>
           {validationError && <p style={{ color: "#ff6b6b", margin: 0, fontSize: 13 }}>{validationError}</p>}
+          {loggedOutReason && <p style={{ color: "#ff6b6b", margin: 0, fontSize: 13 }}>{loggedOutReason}</p>}
         </div>
       </div>
     );
@@ -667,7 +732,11 @@ export default function LookupForm() {
             {displayRows.map((r) => (
               <tr key={r.key}>
                 <td style={{ textAlign: "right", whiteSpace: "nowrap", fontWeight: 700, color: rankColor(r.rank) }}>
-                  {formatRank(r.rank)}
+                  {r.rank === 0 && (r.role === "tank" || r.role === "healer") ? (
+                    <RoleIcon role={r.role} color="#FFFFFF" />
+                  ) : (
+                    formatRank(r.rank)
+                  )}
                 </td>
                 <td style={{ textAlign: "left", fontWeight: 600 }}>
                   <a
@@ -700,7 +769,27 @@ export default function LookupForm() {
           card even though Clear (right column, pushed to its far edge)
           only exists on one side. */}
       <div style={{ display: "grid", gridTemplateColumns: "1fr auto 1fr", alignItems: "center", width: "100%", marginTop: 22 }}>
-        <span />
+        <button
+          type="button"
+          onClick={handleCopySource}
+          disabled={!lastSourceText}
+          style={{
+            background: "none",
+            border: "none",
+            color: lastSourceText ? "#888" : "#444",
+            fontSize: 12,
+            cursor: lastSourceText ? "pointer" : "default",
+            padding: 0,
+            justifySelf: "start",
+            // Mirrors Clear's own marginRight/paddingRight (opposite side,
+            // same 10%/10% amounts) so both sit the same distance from their
+            // respective card edge.
+            marginLeft: "10%",
+            paddingLeft: "10%",
+          }}
+        >
+          Source
+        </button>
         <button
           type="button"
           onClick={handleResetCredentials}

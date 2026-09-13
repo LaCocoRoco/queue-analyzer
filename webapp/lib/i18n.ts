@@ -32,6 +32,7 @@ export interface Dict {
   noValidEntries: string;
   configIncomplete: string;
   wrongAddonVersion: string;
+  apiKeyInvalid: string;
 }
 
 const en: Dict = {
@@ -55,6 +56,7 @@ const en: Dict = {
   noValidEntries: 'No valid "Name-Realm" entries found.',
   configIncomplete: "Configuration incomplete: WCL zone ID/partition not set.",
   wrongAddonVersion: "This webapp expects a different addon version. Please update the addon.",
+  apiKeyInvalid: "Your API key has expired or is invalid. Please re-enter it.",
 };
 
 const de: Dict = {
@@ -78,6 +80,7 @@ const de: Dict = {
   noValidEntries: 'Keine gültigen "Name-Realm"-Einträge gefunden.',
   configIncomplete: "Konfiguration unvollständig: WCL Zone-ID/Partition nicht gesetzt.",
   wrongAddonVersion: "Diese Webapp erwartet eine andere Addon-Version. Bitte Addon aktualisieren.",
+  apiKeyInvalid: "Dein API-Schlüssel ist abgelaufen oder ungültig. Bitte neu eingeben.",
 };
 
 const fr: Dict = {
@@ -101,6 +104,7 @@ const fr: Dict = {
   noValidEntries: 'Aucune entrée "Nom-Royaume" valide trouvée.',
   configIncomplete: "Configuration incomplète : Zone ID/Partition WCL non définies.",
   wrongAddonVersion: "Cette application attend une version différente de l'addon. Merci de mettre à jour l'addon.",
+  apiKeyInvalid: "Ta clé API a expiré ou est invalide. Merci de la ressaisir.",
 };
 
 const es: Dict = {
@@ -124,6 +128,7 @@ const es: Dict = {
   noValidEntries: 'No se encontraron entradas "Nombre-Reino" válidas.',
   configIncomplete: "Configuración incompleta: Zone ID/Partition de WCL no definidos.",
   wrongAddonVersion: "Esta aplicación espera una versión diferente del addon. Actualiza el addon.",
+  apiKeyInvalid: "Tu clave API ha caducado o no es válida. Vuelve a introducirla.",
 };
 
 const it: Dict = {
@@ -147,6 +152,7 @@ const it: Dict = {
   noValidEntries: 'Nessuna voce "Nome-Reame" valida trovata.',
   configIncomplete: "Configurazione incompleta: Zone ID/Partition WCL non impostati.",
   wrongAddonVersion: "Questa app si aspetta una versione diversa dell'addon. Aggiorna l'addon.",
+  apiKeyInvalid: "La tua chiave API è scaduta o non valida. Reinseriscila.",
 };
 
 const ru: Dict = {
@@ -170,6 +176,7 @@ const ru: Dict = {
   noValidEntries: 'Не найдено допустимых записей "Имя-Сервер".',
   configIncomplete: "Неполная конфигурация: Zone ID/Partition WCL не заданы.",
   wrongAddonVersion: "Это веб-приложение ожидает другую версию аддона. Пожалуйста, обновите аддон.",
+  apiKeyInvalid: "Срок действия API-ключа истёк или он недействителен. Введите его заново.",
 };
 
 export const DICTS: Record<Locale, Dict> = { en, de, fr, es, it, ru };
