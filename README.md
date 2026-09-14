@@ -2,7 +2,7 @@
 
 See who's actually applying to your Mythic+ group — WarcraftLogs percentile, RaiderIO/Blizzard score, and a spec strength grade, right in the Group Finder.
 
-**Web app:** https://lacocoroco.github.io/queue-analyzer/
+**Web app:** https://lacocoroco.github.io/queue-analyzer
 **Addon:** https://www.curseforge.com/wow/addons/queueanalyzer
 
 ## How it works
