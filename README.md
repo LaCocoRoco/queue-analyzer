@@ -1,25 +1,21 @@
 # Queue Analyzer
 
-Shows Mythic+ season Best/Median DPS % and Runs (WarcraftLogs) for
-applicants in your Group Finder listing.
+See who's actually applying to your Mythic+ group — WarcraftLogs percentile, RaiderIO/Blizzard score, and a spec strength grade, right in the Group Finder.
 
 **Web app:** https://lacocoroco.github.io/queue-analyzer/
+**Addon:** https://www.curseforge.com/wow/addons/queueanalyzer
 
-## Concept
+## How it works
 
-1. **WoW addon** (`addon/QueueAnalyzer`) -- reads all current applicants of
-   your Premade Group Finder listing and exports them, together with
-   Blizzard's own in-game Mythic+ rating, as a copyable string. The same
-   window takes the ranked result copied back from the webapp and shows it
-   directly in the applicant list. Keybinding, `/qa`, or a button in the
-   applicant window.
-2. **Web app** (`webapp/`) -- one button: "Read from Clipboard" reads the
-   applicant list, queries WCL (and optionally raider.io) for each name,
-   and writes the result straight back to the clipboard, ready to paste
-   into the addon. Fully static (no server); runs entirely in the browser.
-   No login -- each browser enters its own WCL Client ID/Secret once
-   (onboarding screen, stored in the browser only).
+1. **Export** — in WoW, open the Analyzer window (`/qa`) and copy the applicant list.
+2. **Analyze** — paste it into the web app and click Import. It queries WarcraftLogs and RaiderIO for every applicant.
+3. **Import** — copy the result back into the addon. Rank, Log %, and Tier now show right in the applicant list.
 
-## Web app
+## What you get
 
-See `webapp/README.md` for setup and deployment (GitHub Pages).
+- **Log** — WarcraftLogs season or current-dungeon performance percentile
+- **Score** — Blizzard's in-game rating, or a live RaiderIO lookup
+- **Rank** — a colored star for the top 4 applicants, blending Log and Score
+- **Tier** — S/A/B/C spec strength grade, from RaiderIO's population data
+
+No login, no server. Each browser stores its own WarcraftLogs API credentials locally; everything runs client-side.
