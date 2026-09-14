@@ -42,6 +42,44 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # This addon is only ever meant to target whatever retail patch is
+      # CURRENTLY LIVE -- never PTR/Beta (confirmed policy: a past release
+      # accidentally listed an upcoming PTR interface, e.g. "## Interface:
+      # 120100, 120105" while 12.1.0 was still live and 12.1.5 was PTR-only,
+      # which got CurseForge to tag the file with a version nobody could
+      # actually use yet). wago.io's addon-developer API
+      # (addons.wago.io/api/data/game) tracks exactly this distinction --
+      # .patches.retail lists every known patch (PTR/Beta included), while
+      # .live_patches.supported_retail_patches is specifically the one
+      # that's actually live right now. Hard-fails the release if the .toc's
+      # Interface doesn't match, rather than silently uploading a mismatch;
+      # only warns (doesn't block) if wago.io itself can't be reached, since
+      # that's a third-party dependency issue, not evidence of an actual
+      # mismatch.
+      - name: Verify addon targets the current live retail interface
+        run: |
+          TOC_INTERFACE=$(sed -n 's/^## Interface: *//p' addon/QueueAnalyzer/QueueAnalyzer.toc | tr -d '[:space:]')
+          echo "QueueAnalyzer.toc Interface: $TOC_INTERFACE"
+
+          RESPONSE=$(curl -s "https://addons.wago.io/api/data/game" || true)
+          LIVE_PATCH=$(printf '%s' "$RESPONSE" | jq -r '.live_patches.supported_retail_patches // empty' 2>/dev/null)
+
+          if [ -z "$LIVE_PATCH" ]; then
+            echo "::warning::Could not determine the current live retail patch from wago.io -- skipping the interface-version check for this release."
+          else
+            MAJOR=$(echo "$LIVE_PATCH" | cut -d. -f1)
+            MINOR=$(echo "$LIVE_PATCH" | cut -d. -f2)
+            PATCH=$(echo "$LIVE_PATCH" | cut -d. -f3)
+            EXPECTED_INTERFACE=$(printf '%d%02d%02d' "$MAJOR" "$MINOR" "$PATCH")
+            echo "Current live retail patch (wago.io): $LIVE_PATCH -> expected Interface $EXPECTED_INTERFACE"
+
+            if [ "$TOC_INTERFACE" != "$EXPECTED_INTERFACE" ]; then
+              echo "::error::QueueAnalyzer.toc's Interface ($TOC_INTERFACE) doesn't match the current live retail patch $LIVE_PATCH (expected $EXPECTED_INTERFACE). This addon only ever targets the current live version, never PTR/Beta -- update ## Interface: in the .toc before releasing."
+              exit 1
+            fi
+            echo "Interface matches the current live retail patch -- OK."
+          fi
+
       - name: Prepare standalone addon checkout
         run: |
           mkdir -p /tmp/qa-release/QueueAnalyzer
