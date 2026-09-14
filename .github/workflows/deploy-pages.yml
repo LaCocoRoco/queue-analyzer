@@ -20,6 +20,7 @@ permissions:
   contents: read
   pages: write
   id-token: write
+  deployments: read
 
 # Only one deployment at a time; a push while one is running cancels the
 # older run in favor of the newer one instead of queueing.
@@ -44,6 +45,14 @@ jobs:
   # and a populated latestFiles[0].displayName (e.g. "v1.0.0") once a file
   # has actually cleared review -- that's the exact signal checked here, no
   # manual polling needed.
+  #
+  # On a SCHEDULED run specifically, this also checks whether the current
+  # commit is already what's live on Pages, and skips if so -- without this,
+  # once the version gate is satisfied it would stay satisfied on every
+  # future hourly run too (addon majors only go up), rebuilding and
+  # redeploying the exact same unchanged site every single hour forever.
+  # Not needed for push/workflow_dispatch runs -- those only fire because
+  # there's an actual new commit to deploy in the first place.
   check-addon-release:
     runs-on: ubuntu-latest
     outputs:
@@ -54,6 +63,7 @@ jobs:
       - id: check
         env:
           CURSEFORGE_API_KEY: ${{ secrets.CURSEFORGE_READ_API_KEY }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           REQUIRED_MAJOR=$(sed -n 's/.*EXPECTED_ADDON_VERSION = "\([0-9]*\)\..*/\1/p' webapp/lib/lookup.ts)
           if [ -z "$REQUIRED_MAJOR" ]; then
@@ -76,8 +86,25 @@ jobs:
           echo "Webapp requires addon major: $REQUIRED_MAJOR"
           echo "CurseForge currently serves: $LIVE_DISPLAY_NAME (major $LIVE_MAJOR)"
 
+          VERSION_OK=false
           if [ "$LIVE_MAJOR" -ge "$REQUIRED_MAJOR" ] 2>/dev/null; then
+            VERSION_OK=true
+          fi
+
+          ALREADY_LIVE=false
+          if [ "$GITHUB_EVENT_NAME" = "schedule" ]; then
+            DEPLOYED_SHA=$(gh api "repos/$GITHUB_REPOSITORY/deployments?environment=github-pages&per_page=1" --jq '.[0].sha // empty' 2>/dev/null || echo "")
+            echo "Currently live commit: ${DEPLOYED_SHA:-none}; this run's commit: $GITHUB_SHA"
+            if [ -n "$DEPLOYED_SHA" ] && [ "$DEPLOYED_SHA" = "$GITHUB_SHA" ]; then
+              ALREADY_LIVE=true
+            fi
+          fi
+
+          if [ "$VERSION_OK" = "true" ] && [ "$ALREADY_LIVE" = "false" ]; then
             echo "ready=true" >> "$GITHUB_OUTPUT"
+          elif [ "$ALREADY_LIVE" = "true" ]; then
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "Already deployed at this commit -- nothing new to do (expected, not an error)."
           else
             echo "ready=false" >> "$GITHUB_OUTPUT"
             echo "::warning::Addon major $REQUIRED_MAJOR not confirmed live on CurseForge (currently: $LIVE_DISPLAY_NAME) -- skipping this deploy. Will retry automatically on the next hourly run, or on the next push."
