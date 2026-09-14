@@ -70,24 +70,49 @@ local function GetCurrentDungeonName()
 	return name ~= "" and name or nil
 end
 
----Collect Name, Server, Blizzard's own item level, Mythic+ rating and
----assigned role for every member of every current applicant, as flat
----quintuplets (Name, Server, ItemLevel, Rating, Role, repeating) --
+---Collect Name, Server, Blizzard's own item level, Mythic+ rating, assigned
+---role and spec ID for every member of every current applicant, as flat
+---sextuplets (Name, Server, Role, ItemLevel, Rating, SpecID, repeating) --
 ---C_LFGList.GetApplicantMemberInfo already returns itemLevel, dungeonScore
 ---(Blizzard's own in-game Mythic+ rating, the same number shown in the
----"Rating" column) and assignedRole in the very same call we use for the
----name, at zero extra cost -- no separate request, no network round trip.
----assignedRole (not the tank/healer/damage boolean flags, which can all be
----true at once for a flexible/multi-role application) is Blizzard's OWN
----resolution of "which single role is this specific application actually
----for" -- exactly the thing we'd otherwise have to guess at from a cached,
----possibly-stale WCL spec lookup. Name and Server are kept as separate
----fields (rather than one hyphenated "Name-Realm" string) so the webapp
----never has to guess a split point on a realm name. dungeonScore is a
----DIFFERENT number from raider.io's own score (two independently
----calculated ratings that happen to correlate closely, not the same
----value) -- the webapp uses it as a fast default and only calls raider.io
----itself if you explicitly ask it to.
+---"Rating" column), assignedRole AND specID in the very same call we use for
+---the name, at zero extra cost -- no separate request, no network round
+---trip. assignedRole (not the tank/healer/damage boolean flags, which can
+---all be true at once for a flexible/multi-role application) is Blizzard's
+---OWN resolution of "which single role is this specific application
+---actually for" -- exactly the thing we'd otherwise have to guess at from a
+---cached, possibly-stale WCL spec lookup. specID is that same live-and-free
+---advantage applied to the webapp's RaiderIO Tier grade (lib/rioTier.ts) --
+---it used to come from a separate WCL gameData call that's either slow
+---(forceUpdate: true) or sometimes just empty (WCL never independently
+---cached it for that character) -- this is instant and always accurate to
+---what the applicant is CURRENTLY playing. Name and Server are kept as
+---separate fields (rather than one hyphenated "Name-Realm" string) so the
+---webapp never has to guess a split point on a realm name. dungeonScore is a
+---DIFFERENT number from raider.io's own score (two independently calculated
+---ratings that happen to correlate closely, not the same value) -- the
+---webapp uses it as a fast default and only calls raider.io itself if you
+---explicitly ask it to.
+
+---Shortens Blizzard's assignedRole ("TANK"/"HEALER"/"DAMAGER"/"NONE"/"") to
+---a single letter for the export string -- one more field tacked onto every
+---single applicant member adds up fast in a one-line EditBox. Matches the
+---webapp's parseAssignedRole exactly (lib/lookup.ts); anything unrecognized
+---(including "NONE"/"") becomes "", same as before.
+---@param assignedRole string|nil
+---@return string
+local function AssignedRoleCode(assignedRole)
+	if assignedRole == "TANK" then
+		return "T"
+	elseif assignedRole == "HEALER" then
+		return "H"
+	elseif assignedRole == "DAMAGER" then
+		return "D"
+	else
+		return ""
+	end
+end
+
 ---@return string[] entries
 local function GetApplicantNames()
 	local entries = {}
@@ -100,7 +125,7 @@ local function GetApplicantNames()
 		local info = C_LFGList.GetApplicantInfo(applicantID)
 		if info then
 			for memberIdx = 1, info.numMembers do
-				local fullName, _, _, _, itemLevel, _, _, _, _, assignedRole, _, dungeonScore =
+				local fullName, _, _, _, itemLevel, _, _, _, _, assignedRole, _, dungeonScore, _, _, _, specID =
 					C_LFGList.GetApplicantMemberInfo(applicantID, memberIdx)
 				if fullName then
 					local name, realm = strsplit("-", fullName)
@@ -109,9 +134,10 @@ local function GetApplicantNames()
 					end
 					table.insert(entries, name)
 					table.insert(entries, realm)
+					table.insert(entries, AssignedRoleCode(assignedRole))
 					table.insert(entries, tostring(math.floor((itemLevel or 0) + 0.5)))
 					table.insert(entries, tostring(math.floor((dungeonScore or 0) + 0.5)))
-					table.insert(entries, assignedRole or "")
+					table.insert(entries, tostring(specID or 0))
 				end
 			end
 		end
@@ -122,45 +148,40 @@ end
 
 -- Data imported from the webapp (pasted into the import window below), keyed
 -- by the same "Name-Realm" string GetApplicantNames() produces, valued by a
--- {best, rank} table -- rank is 0 when the webapp's Filter wasn't active for
--- that export (nothing to show). Session-only (no SavedVariables) --
--- re-paste after each /reload, matching the export side which is also
--- always re-read live.
+-- {best, rank, tier} table -- rank is 0 when the webapp's Filter wasn't
+-- active for that export (nothing to show); tier is nil when the webapp had
+-- no RaiderIO spec grade for this character's spec. Session-only (no
+-- SavedVariables) -- re-paste after each /reload, matching the export side
+-- which is also always re-read live.
 QueueAnalyzerImportedData = {}
 
--- Which of the two in-game display styles is active -- set from the leading
--- mode token in the webapp's import string (see ParseImportText), driven by
--- the webapp's Table/Name toggle. "table" shows the readouts anchored next
--- to the role icon/iLvl/Rating columns (HookApplicantReadouts); "name"
--- prefixes the applicant's Name itself (HookApplicantNamePrefix) -- always
--- exactly one of the two, never both. Defaults to "table" until the first
--- import of a session.
-QueueAnalyzerDisplayMode = "table"
-
 ---Parse the webapp's flat ":"-delimited import string into a lookup table
----plus the requested display mode (see LookupForm.tsx's toExportString).
----An optional leading "TABLE" or "NAME" token selects the mode; everything
----after it (up to the trailing "i<version>" marker) is the usual
----"Name-Realm:Best:Rank" triplets. Safe to split the whole string on ":"
----since names/realms never contain one; rank is 0, not omitted, when the
----webapp had no rank for an entry, so the triplet stride never has to
----guess.
+---(see LookupForm.tsx's toExportString) -- "Name-Realm:Best:Rank:Tier"
+---quadruplets. Safe to split the whole string on ":" since names/realms
+---never contain one; rank is 0, not omitted, when the webapp had no rank
+---for an entry, and tier is "-", never an empty string, when the webapp had
+---no grade -- an empty field WOULD break this parser, since gmatch("[^:]+")
+---below never yields an empty capture for "::", silently skipping it and
+---shifting every field after it by one. The quadruplet stride never has to
+---guess as long as the webapp holds up its end of that contract.
 ---
 ---Requires the string to END in "i<version>" (see toExportString on the
 ---webapp side, and ADDON_VERSION's comment) -- this addon's OWN Export
 ---string ends in "e<version>" instead and is otherwise the same shape
----(leading token + "Name-Realm:number:number" triplets), so without this
----check, pasting the Export field's own content back into Import here used
----to get silently accepted as if it were real ranked results, reading
----Rating/ItemLevel as Best/Rank. Only the MAJOR component of the embedded
----version has to match this addon's own ADDON_VERSION's major -- Minor/
----patch differences are assumed backwards compatible (nothing about the
----data format itself changed), only a MAJOR bump means the webapp build
----and this addon build actually disagree on the format, which silently
----misreading as valid would be worse than refusing outright. Returns nil
----data and an error message in either failure case, rather than guessing.
+---("Name-Realm:number:number" fields), so without this check, pasting the
+---Export field's own content back into Import here used to get silently
+---accepted as if it were real ranked results, reading Rating/ItemLevel as
+---Best/Rank. Only the MAJOR component of the embedded version has to match
+---this addon's own ADDON_VERSION's major -- Minor/patch differences are
+---assumed backwards compatible (nothing about the data format itself
+---changed), only a MAJOR bump means the webapp build and this addon build
+---actually disagree on the format, which silently misreading as valid would
+---be worse than refusing outright. Returns nil data and an error message in
+---either failure case, rather than guessing.
 ---@param text string
----@return table<string, {best: number, rank: number}>|nil, string|nil, string|nil errorMessage
+---@return table<string, {best: number, rank: number, tier: string|nil}>|nil data
+---@return string|nil errorMessage
+---@return boolean|nil isVersionMismatch
 local function ParseImportText(text)
 	local clean = text:gsub("%s", "") -- strip any incidental whitespace/newlines from pasting
 	local tokens = {}
@@ -171,30 +192,24 @@ local function ParseImportText(text)
 	local marker = tokens[#tokens]
 	local importVersion = marker and marker:match("^i(.+)$")
 	if not importVersion then
-		return nil, nil, "Not an Import result (paste the webapp's output, not the Export field)."
+		return nil, "Not an Import result (paste the webapp's output, not the Export field)."
 	end
 	if MajorVersion(importVersion) ~= MajorVersion(ADDON_VERSION) then
-		return nil, nil, "Wrong version. Please update the addon.", true
+		return nil, "Wrong version. Please update the addon.", true
 	end
 	table.remove(tokens) -- drop the trailing marker, not part of the data itself
 
-	local mode = "table"
-	local startIdx = 1
-	if tokens[1] == "TABLE" or tokens[1] == "NAME" then
-		mode = tokens[1]:lower()
-		startIdx = 2
-	end
-
 	local data = {}
-	for i = startIdx, #tokens - 2, 3 do
+	for i = 1, #tokens - 3, 4 do
 		local key = tokens[i]
 		local best = tonumber(tokens[i + 1])
 		local rank = tonumber(tokens[i + 2])
+		local tier = tokens[i + 3]
 		if key and best and rank then
-			data[key] = { best = best, rank = rank }
+			data[key] = { best = best, rank = rank, tier = (tier ~= "-" and tier or nil) }
 		end
 	end
-	return data, mode, nil
+	return data, nil
 end
 
 -- Percentile color tiers, matching the webapp's percentileColor() exactly
@@ -214,42 +229,60 @@ local function PercentileColorCode(pct)
 	end
 end
 
----@return {best: number, rank: number}|nil
+-- Spec-strength Tier grade (S/A/B/C), matching the webapp's TIER_COLOR
+-- exactly (lib/rioTier.ts) -- a deliberately DIFFERENT palette from
+-- PercentileColorCode above, so a Tier letter is never visually confused
+-- with a Log percentile despite both being letter/number "how good"
+-- indicators. Returns "" (not colored text) for an unknown/nil tier, safe
+-- to concatenate unconditionally.
+local function TierColorCode(tier)
+	if tier == "S" then
+		return "|cffff8000S|r" -- orange
+	elseif tier == "A" then
+		return "|cffff3333A|r" -- red
+	elseif tier == "B" then
+		return "|cff0070ddB|r" -- blue
+	elseif tier == "C" then
+		return "|cff9d9d9dC|r" -- grey
+	else
+		return ""
+	end
+end
+
+---@return {best: number, rank: number, tier: string|nil}|nil
 local function GetImportedData(name, realm)
 	return QueueAnalyzerImportedData[name .. "-" .. realm]
 end
 
 -- Blizzard only repaints an applicant row (which is what actually runs our
--- HookApplicantReadouts/HookApplicantNamePrefix hooks) when its own
--- scrolling/recycling code reinitializes that row -- importing new data
--- here doesn't trigger that, which is why the freshly imported best/rank
--- previously only showed up after scrolling the list up/down (confirmed:
--- that's the same underlying mechanism, just Blizzard-triggered instead of
--- us triggering it). There's no stable public "just redraw everything" API
--- for this list (and it's changed across expansions), so instead of
--- guessing at one, this walks every descendant frame of the applicant
--- panel looking for member sub-frames -- identified by .memberIdx, which
--- Blizzard sets directly on them (same field HookApplicantTooltip already
--- reads) -- and re-invokes the exact same per-member update function
--- Blizzard itself calls to paint a row. Guaranteed correct since it's the
--- very code path our own hooks already piggyback on; just called by us,
--- right after an import, instead of waiting for a scroll to trigger it.
+-- HookApplicantReadouts hook) when its own scrolling/recycling code
+-- reinitializes that row -- importing new data here doesn't trigger that,
+-- which is why the freshly imported best/rank previously only showed up
+-- after scrolling the list up/down.
+--
+-- The applicant panel (LFGListFrame.ApplicationViewer) uses a virtualized
+-- ScrollBox (confirmed against Blizzard's own LFGList.lua source) -- rows
+-- currently scrolled out of view have NO frame at all until the ScrollBox
+-- creates/reuses one for them, so nothing (not even Blizzard itself) can
+-- eagerly repaint an off-screen row without an actual scroll; that part is
+-- an inherent limitation, not a bug. What CAN be forced is a repaint of
+-- every row that IS currently on screen -- this used to walk every
+-- descendant frame of the panel manually looking for .memberIdx sub-frames
+-- and re-invoke the per-member update function on each one, which worked
+-- but was fragile (any wrong assumption about the exact frame hierarchy
+-- could silently stop matching, which is the likely cause of "sometimes
+-- doesn't refresh"). LFGListApplicationViewer_UpdateResults is Blizzard's
+-- OWN "rebuild the results list" function (re-supplies the ScrollBox's data
+-- provider, which forces it to reacquire and repaint every
+-- currently-realized row through the exact same per-member update
+-- function) -- more robust since it's the same call Blizzard's own code
+-- uses, not our own guess at their frame structure.
 local function RefreshApplicantListDisplay()
 	local panel = LFGListFrame and LFGListFrame.ApplicationViewer
-	if not panel or not LFGListApplicationViewer_UpdateApplicantMember then
+	if not panel or not LFGListApplicationViewer_UpdateResults then
 		return
 	end
-
-	local function Walk(f, applicantID)
-		for _, child in ipairs({ f:GetChildren() }) do
-			local childApplicantID = child.applicantID or applicantID
-			if child.memberIdx and childApplicantID then
-				LFGListApplicationViewer_UpdateApplicantMember(child, childApplicantID, child.memberIdx)
-			end
-			Walk(child, childApplicantID)
-		end
-	end
-	Walk(panel, nil)
+	LFGListApplicationViewer_UpdateResults(panel)
 end
 
 local REPO_URL = "https://github.com/LaCocoRoco/queue-analyzer"
@@ -371,7 +404,7 @@ local function CreateQueueAnalyzerFrame()
 	importButton:SetSize(74, 22)
 	importButton:SetPoint("LEFT", importBox, "RIGHT", 8, 0)
 	importButton:SetScript("OnClick", function()
-		local data, mode, errorMessage, isVersionMismatch = ParseImportText(f.importBox:GetText())
+		local data, errorMessage, isVersionMismatch = ParseImportText(f.importBox:GetText())
 		if errorMessage then
 			f.status:SetText(errorMessage)
 			if isVersionMismatch then
@@ -384,7 +417,6 @@ local function CreateQueueAnalyzerFrame()
 			count = count + 1
 		end
 		QueueAnalyzerImportedData = data
-		QueueAnalyzerDisplayMode = mode
 		RefreshApplicantListDisplay()
 		f.status:SetText(count .. " entries imported.")
 	end)
@@ -407,7 +439,7 @@ function QueueAnalyzer_RefreshExport()
 	local dungeonName = GetCurrentDungeonName() or ""
 
 	-- One flat ":"-delimited string
-	-- ("Name:Server:ItemLevel:Rating:Role:Name:Server:ItemLevel:Rating:Role:...:DungeonName:e<version>")
+	-- ("Name:Server:Role:ItemLevel:Rating:SpecID:Name:Server:Role:ItemLevel:Rating:SpecID:...:DungeonName:e<version>")
 	-- instead of separate lines -- easier to select/copy reliably as a
 	-- single line, and the webapp reads it back the same way (splits on
 	-- ":"; names/realms/dungeon names never contain ":"). The dungeon name
@@ -539,56 +571,6 @@ local function HookApplicantTooltip()
 	end)
 end
 
--- Prepends "RANK:BEST:" (or just "BEST:" when no rank was exported) to the
--- name shown for each applicant member in the Application Viewer list
--- itself -- unlike the tooltip above, this is visible without hovering.
--- LFGListApplicationViewer_UpdateApplicantMember is what Blizzard's own code
--- calls to (re)paint a member row's Name text every time the list refreshes
--- (scrolling, new applicants, etc.), so this re-fires often -- it rebuilds
--- the display name itself (Ambiguate + the "  " indent Blizzard uses for
--- group members past the first) from scratch every time rather than reading
--- back member.Name's current text, which would already contain our own
--- prefix from the previous call and double up indefinitely otherwise.
-local hookedApplicantNamePrefix = false
-local function HookApplicantNamePrefix()
-	if hookedApplicantNamePrefix or not LFGListApplicationViewer_UpdateApplicantMember then
-		return
-	end
-	hookedApplicantNamePrefix = true
-
-	hooksecurefunc("LFGListApplicationViewer_UpdateApplicantMember", function(member, appID, memberIdx)
-		if QueueAnalyzerDisplayMode ~= "name" then
-			return -- "table" mode owns the readouts instead; leave Blizzard's own name untouched
-		end
-
-		local fullName = C_LFGList.GetApplicantMemberInfo(appID, memberIdx)
-		if not fullName then
-			return
-		end
-		local name, realm = strsplit("-", fullName)
-		if not realm or realm == "" then
-			realm = GetNormalizedRealmName()
-		end
-
-		local data = GetImportedData(name, realm)
-		if not data then
-			return
-		end
-
-		local displayName = Ambiguate(fullName, "short")
-		if memberIdx > 1 then
-			displayName = "  " .. displayName
-		end
-
-		-- Rank number removed -- the star (see HookApplicantReadouts) is
-		-- considered marker enough for a top applicant now. Just the Log
-		-- value, in its own percentile color.
-		local prefix = PercentileColorCode(data.best) .. string.format("%02d", data.best) .. "|r:"
-
-		member.Name:SetText(prefix .. displayName)
-	end)
-end
-
 -- Button above the applicant list. LFGListFrame only exists once the
 -- Blizzard_GroupFinder addon has loaded (it's load-on-demand), so this
 -- waits for that before creating/parenting the button.
@@ -625,14 +607,13 @@ end
 -- to span the whole source image here, no actual cropping). Same 4 colors
 -- as the webapp's rankColor(), since this replaces the rank NUMBER as the
 -- in-game "top applicant" marker -- rank is no longer shown as text at all
--- anywhere in-game (see HookApplicantNamePrefix and HookApplicantReadouts
--- below).
+-- anywhere in-game (see HookApplicantReadouts below).
 local function StarIcon(rank)
 	local r, g, b
 	if rank == 1 then
 		r, g, b = 255, 128, 0 -- orange
 	elseif rank == 2 then
-		r, g, b = 163, 53, 238 -- purple
+		r, g, b = 255, 51, 51 -- red
 	elseif rank == 3 then
 		r, g, b = 0, 112, 221 -- blue
 	elseif rank == 4 then
@@ -653,19 +634,21 @@ local function GetLastRoleIcon(member)
 	return member.RoleIcon1
 end
 
--- "Table" mode: two small readouts -- the alternative to the name-prefix
--- approach above (HookApplicantNamePrefix), never both at once (see
--- QueueAnalyzerDisplayMode, set from the webapp's Table/Name toggle).
--- Deliberately no header label and the smallest available font: LFGListFrame
+-- Info spread across three spots on the row instead of clustered in one
+-- place ("aufgeteilt", explicitly requested) -- deliberately no header
+-- label and the smallest available font for the two readouts: LFGListFrame
 -- can't be resized (both corners are anchored, so SetWidth is a no-op --
 -- confirmed live), so this has zero room to spare.
---   1. After the last role icon: a single colored star for the top 4
---      ranks, none past that -- no rank NUMBER anywhere in-game anymore,
---      the star alone is the "good applicant" marker (see StarIcon).
---   2. After Rating: log (PercentileColorCode), anchored to member.Rating.
+--   1. Prefixed onto the applicant's Name itself: a single colored star for
+--      the top 4 ranks, none past that -- no rank NUMBER anywhere in-game
+--      anymore, the star alone is the "good applicant" marker (StarIcon).
+--   2. After the last role icon: the RaiderIO spec Tier grade
+--      (TierColorCode), for every applicant with a known spec grade,
+--      regardless of rank.
+--   3. After Rating: log (PercentileColorCode), anchored to member.Rating.
 --      Tanks/healers still get a Log value here now (see lib/lookup.ts) --
---      they just never have a rank (data.rank stays 0), so they still get
---      a Log readout, just never a star.
+--      they just never have a rank (data.rank stays 0), so they never get
+--      a Name-prefix star, but they still get a Tier grade and Log readout.
 local hookedApplicantReadouts = false
 local function HookApplicantReadouts()
 	if hookedApplicantReadouts or not LFGListApplicationViewer_UpdateApplicantMember then
@@ -683,29 +666,40 @@ local function HookApplicantReadouts()
 			realm = GetNormalizedRealmName()
 		end
 
-		-- "name" mode owns the display instead -- clear our own readouts
-		-- (in case a previous import left "table" text sitting there from
-		-- earlier this session) rather than leaving stale numbers up.
-		local data = QueueAnalyzerDisplayMode == "table" and GetImportedData(name, realm) or nil
+		local data = GetImportedData(name, realm)
 
-		if not member.QueueAnalyzerStarReadout then
-			member.QueueAnalyzerStarReadout = member:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+		if not member.QueueAnalyzerTierReadout then
+			member.QueueAnalyzerTierReadout = member:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
 		end
 		if not member.QueueAnalyzerRatingReadout then
 			member.QueueAnalyzerRatingReadout = member:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
 		end
 
 		if not data then
-			member.QueueAnalyzerStarReadout:SetText("")
+			member.QueueAnalyzerTierReadout:SetText("")
 			member.QueueAnalyzerRatingReadout:SetText("")
+			-- Blizzard's own call (earlier in this same update, before this
+			-- hooksecurefunc runs) already set member.Name correctly -- leave
+			-- it untouched rather than rebuilding it with an empty prefix.
 			return
 		end
 
+		-- Rebuilt from scratch every time (Ambiguate + the "  " indent
+		-- Blizzard uses for group members past the first) rather than
+		-- reading back member.Name's current text, which would already
+		-- contain our own star from a previous call and double up
+		-- indefinitely otherwise.
+		local displayName = Ambiguate(fullName, "short")
+		if memberIdx > 1 then
+			displayName = "  " .. displayName
+		end
+		member.Name:SetText(StarIcon(data.rank) .. displayName)
+
 		-- Re-anchored every update (not just on creation) since which role
 		-- icon is the rightmost visible one can change between applicants.
-		member.QueueAnalyzerStarReadout:ClearAllPoints()
-		member.QueueAnalyzerStarReadout:SetPoint("LEFT", GetLastRoleIcon(member), "RIGHT", 2, 0)
-		member.QueueAnalyzerStarReadout:SetText(StarIcon(data.rank))
+		member.QueueAnalyzerTierReadout:ClearAllPoints()
+		member.QueueAnalyzerTierReadout:SetPoint("LEFT", GetLastRoleIcon(member), "RIGHT", 2, 0)
+		member.QueueAnalyzerTierReadout:SetText(TierColorCode(data.tier))
 
 		member.QueueAnalyzerRatingReadout:ClearAllPoints()
 		member.QueueAnalyzerRatingReadout:SetPoint("LEFT", member.Rating, "RIGHT", 2, 0)
@@ -716,7 +710,6 @@ end
 local function OnGroupFinderLoaded()
 	AddApplicationViewerButton()
 	HookApplicantTooltip()
-	HookApplicantNamePrefix()
 	HookApplicantReadouts()
 end
 

@@ -304,6 +304,55 @@ export const ROLE_BY_SPEC_ID: Record<number, Role> = {
   1473: "dps", // Evoker - Augmentation
 };
 
+// Blizzard's official numeric specialization ID -> Blizzard's official
+// numeric class ID (CLASS_BY_ID's keys) -- every spec belongs to exactly
+// one class, so this is a pure, stable lookup, same grouping as
+// ROLE_BY_SPEC_ID above. Lets lookupOne (lib/lookup.ts) derive classId
+// straight from the addon's own live specID export instead of waiting on
+// (or accepting gaps in) WCL's gameData -- same reasoning as specId/role
+// already get from the addon, applied to the class-color table column too.
+export const CLASS_ID_BY_SPEC_ID: Record<number, number> = {
+  71: 1, // Warrior - Arms
+  72: 1, // Warrior - Fury
+  73: 1, // Warrior - Protection
+  65: 2, // Paladin - Holy
+  66: 2, // Paladin - Protection
+  70: 2, // Paladin - Retribution
+  253: 3, // Hunter - Beast Mastery
+  254: 3, // Hunter - Marksmanship
+  255: 3, // Hunter - Survival
+  259: 4, // Rogue - Assassination
+  260: 4, // Rogue - Outlaw
+  261: 4, // Rogue - Subtlety
+  256: 5, // Priest - Discipline
+  257: 5, // Priest - Holy
+  258: 5, // Priest - Shadow
+  250: 6, // Death Knight - Blood
+  251: 6, // Death Knight - Frost
+  252: 6, // Death Knight - Unholy
+  262: 7, // Shaman - Elemental
+  263: 7, // Shaman - Enhancement
+  264: 7, // Shaman - Restoration
+  62: 8, // Mage - Arcane
+  63: 8, // Mage - Fire
+  64: 8, // Mage - Frost
+  265: 9, // Warlock - Affliction
+  266: 9, // Warlock - Demonology
+  267: 9, // Warlock - Destruction
+  268: 10, // Monk - Brewmaster
+  269: 10, // Monk - Windwalker
+  270: 10, // Monk - Mistweaver
+  102: 11, // Druid - Balance
+  103: 11, // Druid - Feral
+  104: 11, // Druid - Guardian
+  105: 11, // Druid - Restoration
+  577: 12, // Demon Hunter - Havoc
+  581: 12, // Demon Hunter - Vengeance
+  1467: 13, // Evoker - Devastation
+  1468: 13, // Evoker - Preservation
+  1473: 13, // Evoker - Augmentation
+};
+
 export interface CharacterProfile {
   zoneRankings: ZoneRankings | null;
   // Only present when a dungeon-specific lookup was requested (encounterID
@@ -318,6 +367,10 @@ export interface CharacterProfile {
   // Current role, derived from Blizzard's own active_spec.id (see
   // ROLE_BY_SPEC_ID), or null if unknown/unrecognized.
   role: Role | null;
+  // Blizzard's own numeric spec ID (active_spec.id itself), or null if
+  // unknown -- see extractSpecId's comment for why this is kept separately
+  // from role.
+  specId: number | null;
 }
 
 // metric: points_and_damage for DPS and tanks, points_and_healing for
@@ -330,8 +383,15 @@ export interface CharacterProfile {
 // role-appropriate one.
 //
 // gameData is WCL's cached copy of Blizzard's own character profile API
-// response (no extra live Blizzard call -- same cost as the rest of this
-// query); we only need character_class.name out of it.
+// response. forceUpdate: true (WCL will go fetch a live copy from Blizzard
+// instead of only returning an existing cache) DOES fix the case where
+// classId/specId come back null for a character WCL hasn't independently
+// cached yet -- confirmed live -- but also confirmed live to make every
+// single lookup noticeably slower (a real outbound Blizzard round-trip per
+// character instead of a DB read), which isn't worth it for a batch of a
+// few dozen applicants. Left off (the default, equivalent to
+// forceUpdate: false) -- classId/specId/tier just stay null for whichever
+// characters WCL hasn't already cached on its own, same tradeoff as before.
 const CHARACTER_PROFILE_QUERY = `
 query($name: String!, $serverSlug: String!, $serverRegion: String!, $zoneID: Int!, $partition: Int!, $metric: CharacterPageRankingMetricType!) {
   characterData {
@@ -393,6 +453,17 @@ function extractRole(gameData: unknown): Role | null {
   return ROLE_BY_SPEC_ID[specId] ?? null;
 }
 
+// Blizzard's numeric spec ID itself (not just the tank/healer/dps role it
+// maps to via ROLE_BY_SPEC_ID) -- needed separately to look up a spec's
+// RaiderIO tier grade later (see lib/rioTier.ts), which is specific to e.g.
+// "Blood Death Knight" vs. "Frost Death Knight", not just "this is a tank".
+function extractSpecId(gameData: unknown): number | null {
+  if (!gameData || typeof gameData !== "object") {
+    return null;
+  }
+  return (gameData as ParsedGameData).global?.active_spec?.id ?? null;
+}
+
 // getCharacterProfile returns:
 //   - null if WCL doesn't know this name/realm/region combination at all
 //   - a profile with zoneRankings.bestPerformanceAverage === null if the
@@ -448,6 +519,7 @@ export async function getCharacterProfile(
     encounterRankings: encounterData?.characterData.character?.encounterRankings ?? null,
     classId: extractClassId(char.gameData),
     role: extractRole(char.gameData),
+    specId: extractSpecId(char.gameData),
   };
 }
 

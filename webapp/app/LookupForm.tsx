@@ -16,30 +16,31 @@ import {
   type RankedResult,
 } from "@/lib/lookup";
 import { toServerSlug, validateCredentials } from "@/lib/wcl";
+import { TIER_COLOR } from "@/lib/rioTier";
 
-// Flat ":"-delimited "MODE:Name-Realm:Best:Rank:Name-Realm:Best:Rank:...:i<version>"
-// -- the format the addon's import window parses (see Core.lua's
-// ParseImportText). A single line pastes far more reliably into WoW's
-// EditBox than a multi-line block. Safe because names/realms never contain
-// ":". Best is rounded to a whole number -- no decimals in anything that
-// ends up visible in-game. Rank is always present (fixed triplets, never
-// pairs) so the addon-side parser never has to guess the stride -- it's
-// just 0 when Filter wasn't used for this export, which the addon reads as
-// "no rank to show". The leading MODE token ("TABLE" or "NAME") tells the
-// addon which of its two mutually-exclusive display styles to use -- see
-// the Table/Name toggle below. The trailing "i<version>" marker lets the
-// addon's ParseImportText tell this string apart from its OWN Export
-// string (which is a similar enough shape -- "stuff:Name-Realm:number:
-// number:...e<version>" -- that pasting one into the other used to get
-// silently misread as real data instead of rejected), AND lets it check
-// the version matches its own -- see EXPECTED_ADDON_VERSION's comment in
-// lib/lookup.ts.
-function toExportString(results: RankedResult[], displayMode: DisplayMode): string {
-  const mode = displayMode === "name" ? "NAME" : "TABLE";
-  const triplets = results
+// Flat ":"-delimited
+// "Name-Realm:Best:Rank:Tier:Name-Realm:Best:Rank:Tier:...:i<version>" -- the
+// format the addon's import window parses (see Core.lua's ParseImportText).
+// A single line pastes far more reliably into WoW's EditBox than a
+// multi-line block. Safe because names/realms never contain ":". Best is
+// rounded to a whole number -- no decimals in anything that ends up visible
+// in-game. Rank is always present (fixed quadruplets, never fewer) so the
+// addon-side parser never has to guess the stride -- it's just 0 when
+// Filter wasn't used for this export, which the addon reads as "no rank to
+// show". Tier is "-" (never an empty string) when unknown -- an empty field
+// would make the addon's ":"-split silently skip it (Lua's gmatch("[^:]+")
+// never yields empty captures), shifting every field after it by one and
+// corrupting the whole parse. The trailing "i<version>" marker lets the
+// addon's ParseImportText tell this string apart from its OWN Export string
+// (which is a similar enough shape -- "stuff:Name-Realm:number:number:
+// ...e<version>" -- that pasting one into the other used to get silently
+// misread as real data instead of rejected), AND lets it check the version
+// matches its own -- see EXPECTED_ADDON_VERSION's comment in lib/lookup.ts.
+function toExportString(results: RankedResult[]): string {
+  const quadruplets = results
     .filter((r) => !r.error)
-    .flatMap((r) => [r.key, Math.round(r.best).toString(), r.rank.toString()]);
-  return [mode, ...triplets, `i${EXPECTED_ADDON_VERSION}`].join(":");
+    .flatMap((r) => [r.key, Math.round(r.best).toString(), r.rank.toString(), r.tier ?? "-"]);
+  return [...quadruplets, `i${EXPECTED_ADDON_VERSION}`].join(":");
 }
 
 // Standard WoW class colors (RAID_CLASS_COLORS), keyed by Blizzard's
@@ -72,16 +73,17 @@ function percentileColor(pct: number): string {
   return "#9D9D9D";
 }
 
-// Same 5 colors as percentileColor, but keyed by absolute RANK POSITION
-// (1st/2nd/3rd/4th, everything else grey) instead of a percentile value --
-// a deliberately separate function, not a reuse of percentileColor, since
-// the two used to look identical in-game (rank digits were colored by the
-// LOG percentile) which read as "these two numbers are the same thing"
-// when they aren't. 0 (unranked -- tanks/healers, see withRanks) falls
-// through to grey along with every rank past 4th.
+// Keyed by absolute RANK POSITION (1st/2nd/3rd/4th, everything else grey)
+// instead of a percentile value -- a deliberately separate function, not a
+// reuse of percentileColor, since the two used to look identical in-game
+// (rank digits were colored by the LOG percentile) which read as "these two
+// numbers are the same thing" when they aren't. Its own palette, not the
+// orange/purple/blue/green item-quality one percentileColor uses -- 2nd is
+// red, explicitly requested. 0 (unranked -- tanks/healers, see withRanks)
+// falls through to grey along with every rank past 4th.
 function rankColor(rank: number): string {
   if (rank === 1) return "#FF8000";
-  if (rank === 2) return "#A335EE";
+  if (rank === 2) return "#FF3333";
   if (rank === 3) return "#0070DD";
   if (rank === 4) return "#1EFF00";
   return "#9D9D9D";
@@ -144,12 +146,6 @@ function applyBlizzardScoreAsIo(results: LookupResult[]): LookupResult[] {
     return { ...r, ioScore: r.blizzardScore, ioColor: percentileColor(norm) };
   });
 }
-
-// Which of the addon's two mutually-exclusive in-game display styles the
-// export string requests -- "table" anchors the readouts next to the role
-// icon/iLvl/Rating columns, "name" prefixes the applicant's Name instead
-// (see Core.lua's QueueAnalyzerDisplayMode).
-type DisplayMode = "table" | "name";
 
 type ButtonState = "idle" | "loading" | "done" | "error";
 
@@ -218,9 +214,6 @@ export default function LookupForm() {
   // every export, no extra request) is the fast default IO source. Turning
   // this on switches to an actual raider.io lookup instead.
   const [raiderIoEnabled, setRaiderIoEnabled] = useState(false);
-  // Which in-game display style the export string requests -- "table"
-  // (the default) matches the addon's original readout placement.
-  const [displayMode, setDisplayMode] = useState<DisplayMode>("table");
   // Season (default) uses WCL's whole-season zoneRankings; Dungeon narrows
   // to just the current Keystone dungeon (see Core.lua's
   // GetCurrentDungeonName) via encounterRankings instead -- see
@@ -372,12 +365,20 @@ export default function LookupForm() {
       const blizzardScoreByKey = new Map(entries.map((e) => [e.key, e.blizzardScore]));
       const blizzardItemLevelByKey = new Map(entries.map((e) => [e.key, e.blizzardItemLevel]));
       const roleByKey = new Map(entries.map((e) => [e.key, e.addonRole]));
+      const specIdByKey = new Map(entries.map((e) => [e.key, e.addonSpecId]));
 
       // Always resolved regardless of dungeonMode -- both season and
       // dungeon values get fetched every time (one WCL query covers both,
       // see lib/wcl.ts), so switching the Season/Dungeon toggle afterwards
       // can update the table instantly instead of needing a re-import.
-      let finalResults = await runLookup(names, creds.clientId, creds.clientSecret, dungeonName, roleByKey);
+      let finalResults = await runLookup(
+        names,
+        creds.clientId,
+        creds.clientSecret,
+        dungeonName,
+        roleByKey,
+        specIdByKey
+      );
       finalResults = finalResults.map((r) => {
         const blizzardItemLevel = blizzardItemLevelByKey.get(r.key) ?? 0;
         return {
@@ -425,7 +426,7 @@ export default function LookupForm() {
         logsWeight,
         ioWeight
       );
-      await navigator.clipboard.writeText(toExportString(rankedResults, displayMode));
+      await navigator.clipboard.writeText(toExportString(rankedResults));
 
       setButtonState("done");
       setTimeout(() => setButtonState("idle"), 1800);
@@ -607,10 +608,10 @@ export default function LookupForm() {
         </label>
       </div>
 
-      {/* The three two-way toggles below share one grid (label | switch |
+      {/* The two two-way toggles below share one grid (label | switch |
           label columns) instead of each being its own centered flex row --
           that left their switches at different x-positions depending on
-          each row's label text length. The grid keeps all three switches
+          each row's label text length. The grid keeps both switches
           lined up under each other. Each <label> is display:contents so its
           children become direct grid items (the still-adjacent, just
           invisible, checkbox stays out of grid flow entirely since it's
@@ -666,24 +667,6 @@ export default function LookupForm() {
           </span>
         </label>
 
-        {/* Table vs Name -- which in-game display style the export string
-            requests (see Core.lua's QueueAnalyzerDisplayMode), mutually
-            exclusive. Unchecked (left/default) = the role icon/iLvl/Rating
-            readouts. Checked (right) = the Name prefix instead. */}
-        <label className="qa-toggle qa-toggle-2way" style={{ display: "contents" }}>
-          <span className="qa-toggle-label" style={{ justifySelf: "end" }} data-active={displayMode === "table"}>
-            Table Display
-          </span>
-          <input
-            type="checkbox"
-            checked={displayMode === "name"}
-            onChange={(e) => setDisplayMode(e.target.checked ? "name" : "table")}
-          />
-          <span className="qa-toggle-track" />
-          <span className="qa-toggle-label" style={{ justifySelf: "start" }} data-active={displayMode === "name"}>
-            Name Display
-          </span>
-        </label>
       </div>
 
       {filterEnabled && (
@@ -722,6 +705,7 @@ export default function LookupForm() {
           <thead>
             <tr>
               <th style={{ textAlign: "right", width: "1%", whiteSpace: "nowrap" }}>Rank</th>
+              <th style={{ textAlign: "right", width: "1%", whiteSpace: "nowrap" }}>Tier</th>
               <th style={{ textAlign: "left" }}>Name</th>
               <th>iLvl</th>
               <th>LOG</th>
@@ -737,6 +721,9 @@ export default function LookupForm() {
                   ) : (
                     formatRank(r.rank)
                   )}
+                </td>
+                <td style={{ textAlign: "right", whiteSpace: "nowrap", fontWeight: 700, color: r.tier ? TIER_COLOR[r.tier] : undefined }}>
+                  {r.tier ?? "-"}
                 </td>
                 <td style={{ textAlign: "left", fontWeight: 600 }}>
                   <a

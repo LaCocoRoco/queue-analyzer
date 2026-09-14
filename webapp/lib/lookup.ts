@@ -5,8 +5,17 @@
 // this used to be a Next.js API route (server-side), moved here unchanged
 // in logic when the app became a static export with no server at all.
 
-import { getCharacterProfile, getCurrentSeason, hasData, runsEstimate, toServerSlug, type Role } from "./wcl";
+import {
+  CLASS_ID_BY_SPEC_ID,
+  getCharacterProfile,
+  getCurrentSeason,
+  hasData,
+  runsEstimate,
+  toServerSlug,
+  type Role,
+} from "./wcl";
 import { getRioProfile } from "./rio";
+import { getSpecTiers, type TierGrade } from "./rioTier";
 
 export const REGION = process.env.NEXT_PUBLIC_WCL_REGION ?? "EU";
 
@@ -27,7 +36,7 @@ const CONCURRENCY = 10;
 // ParseImportText) -- so either side running a mismatched build gets a
 // clear "wrong version" error instead of silently misreading a format it
 // doesn't actually speak.
-export const EXPECTED_ADDON_VERSION = "0.3.0";
+export const EXPECTED_ADDON_VERSION = "1.0.0";
 
 // Thrown for the user-facing failure cases here, carrying a stable code
 // instead of a hardcoded-language message -- the UI maps the code to the
@@ -55,6 +64,20 @@ export interface LookupResult {
   // table -- "rank" only ever meant "how does this DPS compare to the
   // other DPS applicants".
   role: Role | null;
+  // Blizzard's own numeric spec ID (see wcl.ts's extractSpecId), or null if
+  // unknown -- used only to look up this spec's RaiderIO Tier grade below,
+  // kept separate from `role` since e.g. "Blood" vs "Frost" Death Knight
+  // share a role but not a specId.
+  specId: number | null;
+  // Spec-strength grade (S/A/B/C) from raider.io's cutoff-analysis (see
+  // lib/rioTier.ts) -- how strong this applicant's SPEC currently is
+  // relative to every other spec, NOT how well this specific applicant
+  // plays it (that's `best`/the Log value). Filled in by runLookup after
+  // the main WCL pass, once per batch (one shared raider.io fetch, not one
+  // per character) -- null until then, or permanently null if raider.io has
+  // no cutoff data for this specId at all. Deliberately not folded into
+  // ranking -- informational only, per explicit request.
+  tier: TierGrade | null;
   // Season and Dungeon values are BOTH always fetched (one WCL query
   // already returns everything -- see lookupOne) and kept side by side
   // here, rather than collapsing to a single best/median/runs at fetch
@@ -107,40 +130,49 @@ function parseNameRealm(line: string): { name: string; realm: string } | null {
   return { name: line.slice(0, idx), realm: line.slice(idx + 1) };
 }
 
-// Blizzard's own assignedRole string (see Core.lua's GetApplicantNames) --
+// Blizzard's own assignedRole (see Core.lua's GetApplicantMemberInfo --
 // "TANK"/"HEALER"/"DAMAGER" is the standard convention used across
-// Blizzard's own APIs (e.g. UnitGroupRolesAssigned). This is the role
-// Blizzard itself resolved for THIS SPECIFIC application, not the raw
-// tank/healer/damage capability flags (which can all be true at once for a
-// flexible/multi-spec application) -- exactly the thing that would
-// otherwise have to be guessed at from a cached, possibly-stale WCL spec
-// lookup. Returns null for "NONE"/empty/anything unrecognized, in which
-// case lookupOne falls back to WCL's own gameData-derived role instead.
+// Blizzard's own APIs, e.g. UnitGroupRolesAssigned), shortened by the addon
+// to a single letter (AssignedRoleCode in Core.lua) before export -- one
+// more field per applicant member adds up fast in a one-line EditBox. This
+// is the role Blizzard itself resolved for THIS SPECIFIC application, not
+// the raw tank/healer/damage capability flags (which can all be true at
+// once for a flexible/multi-spec application) -- exactly the thing that
+// would otherwise have to be guessed at from a cached, possibly-stale WCL
+// spec lookup. Returns null for an empty/unrecognized code (the addon sends
+// "" for Blizzard's "NONE" or an unknown value), in which case lookupOne
+// falls back to WCL's own gameData-derived role instead.
 function parseAssignedRole(raw: string): Role | null {
   switch (raw) {
-    case "TANK":
+    case "T":
       return "tank";
-    case "HEALER":
+    case "H":
       return "healer";
-    case "DAMAGER":
+    case "D":
       return "dps";
     default:
       return null;
   }
 }
 
-// The addon exports "Name:Server:ItemLevel:Score:Role:Name:Server:ItemLevel:
-// Score:Role:...:Dungeon:EXPORT" (see Core.lua's GetApplicantNames/
-// QueueAnalyzer_RefreshExport) -- fixed quintuplets (Name, Server,
-// Blizzard's own item level, Blizzard's own in-game Mythic+ rating,
-// Blizzard's own assignedRole) for every applicant member, followed by ONE
-// trailing Dungeon field (the leader's current Keystone dungeon, empty if
-// none -- see Core.lua's GetCurrentDungeonName) and the "EXPORT" marker.
-// Dungeon sits at the END, not repeated per applicant, since it's a single
-// value for the whole listing -- repeating it per member would be pure
-// waste. Name/Server are separate fields rather than one hyphenated
-// "Name-Realm" string -- avoids ever having to guess a split point on a
-// realm name (some contain non-ASCII/parenthesized parts).
+// The addon exports "Name:Server:Role:ItemLevel:Score:SpecID:Name:Server:
+// Role:ItemLevel:Score:SpecID:...:Dungeon:EXPORT" (see Core.lua's
+// GetApplicantNames/QueueAnalyzer_RefreshExport) -- fixed sextuplets (Name,
+// Server, Blizzard's own item level, Blizzard's own in-game Mythic+ rating,
+// Blizzard's own assignedRole, Blizzard's own active spec ID) for every
+// applicant member, followed by ONE trailing Dungeon field (the leader's
+// current Keystone dungeon, empty if none -- see Core.lua's
+// GetCurrentDungeonName) and the "EXPORT" marker. SpecID is Blizzard's own
+// LIVE value (same call as everything else here, zero extra cost) -- lets
+// the RaiderIO Tier grade (lib/rioTier.ts) skip WCL's gameData lookup
+// entirely for characters the addon already told us the spec of, instead of
+// needing a slow forceUpdate call or accepting gaps where WCL hasn't
+// independently cached it (see lookupOne). Dungeon sits at the END, not
+// repeated per applicant, since it's a single value for the whole listing
+// -- repeating it per member would be pure waste. Name/Server are separate
+// fields rather than one hyphenated "Name-Realm" string -- avoids ever
+// having to guess a split point on a realm name (some contain
+// non-ASCII/parenthesized parts).
 //
 // The trailing "e<version>" marker is what toExportString below writes back
 // as "i<version>" instead -- the two formats used to be similar enough in
@@ -160,7 +192,13 @@ function majorVersion(version: string): string {
 
 export function parseClipboardText(rawText: string): {
   dungeonName: string | null;
-  entries: { key: string; blizzardScore: number; blizzardItemLevel: number; addonRole: Role | null }[];
+  entries: {
+    key: string;
+    blizzardScore: number;
+    blizzardItemLevel: number;
+    addonRole: Role | null;
+    addonSpecId: number | null;
+  }[];
 } {
   const trimmed = rawText.trim();
   if (trimmed === "") {
@@ -178,16 +216,23 @@ export function parseClipboardText(rawText: string): {
   const dungeonName = tokens[tokens.length - 1]?.trim() || null;
   const memberTokens = tokens.slice(0, -1);
 
-  const entries: { key: string; blizzardScore: number; blizzardItemLevel: number; addonRole: Role | null }[] = [];
-  for (let i = 0; i + 4 < memberTokens.length; i += 5) {
+  const entries: {
+    key: string;
+    blizzardScore: number;
+    blizzardItemLevel: number;
+    addonRole: Role | null;
+    addonSpecId: number | null;
+  }[] = [];
+  for (let i = 0; i + 5 < memberTokens.length; i += 6) {
     const name = memberTokens[i];
     const server = memberTokens[i + 1];
     if (!name || !server) continue;
     entries.push({
       key: `${name}-${server}`,
-      blizzardItemLevel: Number(memberTokens[i + 2]) || 0,
-      blizzardScore: Number(memberTokens[i + 3]) || 0,
-      addonRole: parseAssignedRole(memberTokens[i + 4]),
+      addonRole: parseAssignedRole(memberTokens[i + 2]),
+      blizzardItemLevel: Number(memberTokens[i + 3]) || 0,
+      blizzardScore: Number(memberTokens[i + 4]) || 0,
+      addonSpecId: Number(memberTokens[i + 5]) || null,
     });
   }
   return { dungeonName, entries };
@@ -203,7 +248,13 @@ export function parseClipboardText(rawText: string): {
 // unknown/missing addonRole as damage-focused (points_and_damage/dps) by
 // default. The FINAL role recorded on the result (used later for ranking)
 // still prefers addonRole but falls back to WCL's cached role if the addon
-// didn't send one at all.
+// didn't send one at all. addonSpecId is the same idea applied to the
+// RaiderIO Tier grade AND to classId (the class-color table column) --
+// always preferred over WCL's own gameData (which needs a slow forceUpdate
+// call, or is just null if WCL never independently cached it -- see wcl.ts's
+// CHARACTER_PROFILE_QUERY comment), falling back to it only if the addon
+// didn't send a usable specId (CLASS_ID_BY_SPEC_ID is a pure, always-correct
+// lookup once a specId is known at all).
 async function lookupOne(
   name: string,
   realm: string,
@@ -211,11 +262,15 @@ async function lookupOne(
   partition: number,
   encounterID: number | undefined,
   addonRole: Role | null,
+  addonSpecId: number | null,
   clientId: string,
   clientSecret: string
 ): Promise<LookupResult | null> {
   const key = `${name}-${realm}`;
   const slug = toServerSlug(realm);
+  // Computed upfront, before the WCL call even resolves -- doesn't depend
+  // on `profile` at all when the addon sent a recognized specId.
+  const addonClassId = addonSpecId != null ? (CLASS_ID_BY_SPEC_ID[addonSpecId] ?? null) : null;
 
   let profile;
   try {
@@ -235,9 +290,11 @@ async function lookupOne(
       key,
       name,
       realm,
-      classId: null,
+      classId: addonClassId,
       found: false,
       role: addonRole,
+      specId: addonSpecId,
+      tier: null,
       seasonBest: 0,
       seasonMedian: 0,
       seasonRuns: 0,
@@ -275,9 +332,11 @@ async function lookupOne(
       key,
       name,
       realm,
-      classId: profile!.classId,
+      classId: addonClassId ?? profile!.classId,
       found: true,
       role,
+      specId: addonSpecId ?? profile!.specId,
+      tier: null,
       seasonBest: zr.bestPerformanceAverage ?? 0,
       seasonMedian: zr.medianPerformanceAverage ?? 0,
       seasonRuns: runsEstimate(zr),
@@ -297,9 +356,11 @@ async function lookupOne(
     key,
     name,
     realm,
-    classId: profile?.classId ?? null,
+    classId: addonClassId ?? profile?.classId ?? null,
     found: false,
     role,
+    specId: addonSpecId ?? profile?.specId ?? null,
+    tier: null,
     seasonBest: 0,
     seasonMedian: 0,
     seasonRuns: 0,
@@ -447,12 +508,18 @@ export function withRanks(results: EffectiveResult[], logsWeight: number, ioWeig
 // parseClipboardText/parseAssignedRole), keyed by "Name-Realm" -- passed
 // through to lookupOne so the tank/healer exclusion can use it instead of
 // (or as well as) WCL's own cached role.
+//
+// specIdByKey: Blizzard's own live active spec ID per applicant (see
+// parseClipboardText), same idea as roleByKey -- passed through to
+// lookupOne so the RaiderIO Tier grade doesn't have to wait on (or fall
+// back to gaps in) WCL's own gameData.specId.
 export async function runLookup(
   rawNames: string[],
   clientId: string,
   clientSecret: string,
   dungeonName: string | null,
-  roleByKey: Map<string, Role | null>
+  roleByKey: Map<string, Role | null>,
+  specIdByKey: Map<string, number | null>
 ): Promise<LookupResult[]> {
   const season = await getCurrentSeason(clientId, clientSecret);
   if (!season.zoneID || !season.partition) {
@@ -470,8 +537,12 @@ export async function runLookup(
     throw new LookupError("NO_VALID_ENTRIES");
   }
 
-  const results = (
-    await mapWithConcurrency(entries, CONCURRENCY, ({ name, realm }) =>
+  // Fetched in parallel with the main WCL pass, not after it -- the tier
+  // map doesn't depend on `results` at all, and is cached (see
+  // getSpecTiers/lib/rioTier.ts) so every Import after the first resolves
+  // this instantly anyway.
+  const [rawResults, tierBySpec] = await Promise.all([
+    mapWithConcurrency(entries, CONCURRENCY, ({ name, realm }) =>
       lookupOne(
         name,
         realm,
@@ -479,11 +550,17 @@ export async function runLookup(
         season.partition,
         encounterID,
         roleByKey.get(`${name}-${realm}`) ?? null,
+        specIdByKey.get(`${name}-${realm}`) ?? null,
         clientId,
         clientSecret
       )
-    )
-  ).filter((r): r is LookupResult => r !== null);
+    ),
+    getSpecTiers(REGION),
+  ]);
+
+  const results = rawResults
+    .filter((r): r is LookupResult => r !== null)
+    .map((r) => ({ ...r, tier: r.specId != null ? (tierBySpec.get(r.specId) ?? null) : null }));
 
   return results;
 }

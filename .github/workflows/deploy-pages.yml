@@ -6,6 +6,14 @@ on:
     paths:
       - "webapp/**"
       - ".github/workflows/deploy-pages.yml"
+  # Retries the addon-release gate below on its own, with no new push needed
+  # -- CurseForge approval happens on CurseForge's own schedule, not ours, so
+  # a push that lands while a newer addon major is still pending review would
+  # otherwise stay blocked forever until someone happens to push again.
+  # Hourly is plenty for a personal project (approval takes hours/days, not
+  # minutes) and this job is cheap (no build, just one API call) either way.
+  schedule:
+    - cron: "0 * * * *"
   workflow_dispatch:
 
 permissions:
@@ -20,7 +28,64 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Blocks the webapp deploy until CurseForge is actually serving an addon
+  # build whose MAJOR version matches (or exceeds) what this webapp commit
+  # requires (see webapp/lib/lookup.ts's EXPECTED_ADDON_VERSION and Core.lua's
+  # ADDON_VERSION/MajorVersion -- only the major component has to match,
+  # minor/patch are backwards compatible). Without this, a webapp push that
+  # bumps the required major could go live BEFORE the matching addon build
+  # clears CurseForge review, breaking the addon for everyone still on the
+  # old (still-approved) version in the meantime.
+  #
+  # CurseForge's public "CurseForge for Studios" API (api.curseforge.com,
+  # NOT the legacy wow.curseforge.com upload API CF_API_KEY is for -- see
+  # CURSEFORGE_READ_API_KEY, a separate secret) is confirmed live to report
+  # mainFileId: 0 / latestFiles: [] for a project with no approved file yet,
+  # and a populated latestFiles[0].displayName (e.g. "v1.0.0") once a file
+  # has actually cleared review -- that's the exact signal checked here, no
+  # manual polling needed.
+  check-addon-release:
+    runs-on: ubuntu-latest
+    outputs:
+      ready: ${{ steps.check.outputs.ready }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: check
+        env:
+          CURSEFORGE_API_KEY: ${{ secrets.CURSEFORGE_READ_API_KEY }}
+        run: |
+          REQUIRED_MAJOR=$(sed -n 's/.*EXPECTED_ADDON_VERSION = "\([0-9]*\)\..*/\1/p' webapp/lib/lookup.ts)
+          if [ -z "$REQUIRED_MAJOR" ]; then
+            echo "::error::Could not extract EXPECTED_ADDON_VERSION's major from webapp/lib/lookup.ts"
+            exit 1
+          fi
+
+          # `|| true` on the curl and a jq fallback below are deliberate: a
+          # CurseForge outage or transient network error should degrade to
+          # "not confirmed ready, skip this run" (retried automatically next
+          # hour) rather than a hard-failed, red-X workflow run every time
+          # CurseForge hiccups.
+          RESPONSE=$(curl -s -H "x-api-key: $CURSEFORGE_API_KEY" "https://api.curseforge.com/v1/mods/1692771" || true)
+          LIVE_DISPLAY_NAME=$(printf '%s' "$RESPONSE" | jq -r '.data.latestFiles[0].displayName // "v0.0.0"' 2>/dev/null)
+          if [ -z "$LIVE_DISPLAY_NAME" ]; then
+            LIVE_DISPLAY_NAME="v0.0.0"
+          fi
+          LIVE_MAJOR=$(echo "$LIVE_DISPLAY_NAME" | sed -E 's/^[vV]?([0-9]+).*/\1/')
+
+          echo "Webapp requires addon major: $REQUIRED_MAJOR"
+          echo "CurseForge currently serves: $LIVE_DISPLAY_NAME (major $LIVE_MAJOR)"
+
+          if [ "$LIVE_MAJOR" -ge "$REQUIRED_MAJOR" ] 2>/dev/null; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Addon major $REQUIRED_MAJOR not confirmed live on CurseForge (currently: $LIVE_DISPLAY_NAME) -- skipping this deploy. Will retry automatically on the next hourly run, or on the next push."
+          fi
+
   build:
+    needs: check-addon-release
+    if: needs.check-addon-release.outputs.ready == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
