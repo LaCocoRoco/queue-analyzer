@@ -8,6 +8,7 @@
 import {
   CLASS_ID_BY_SPEC_ID,
   getCharacterProfile,
+  getCurrentRaidZone,
   getCurrentSeason,
   hasData,
   runsEstimate,
@@ -36,7 +37,7 @@ const CONCURRENCY = 10;
 // ParseImportText) -- so either side running a mismatched build gets a
 // clear "wrong version" error instead of silently misreading a format it
 // doesn't actually speak.
-export const EXPECTED_ADDON_VERSION = "1.0.0";
+export const EXPECTED_ADDON_VERSION = "2.0.0";
 
 // Thrown for the user-facing failure cases here, carrying a stable code
 // instead of a hardcoded-language message -- the UI maps the code to the
@@ -155,21 +156,27 @@ function parseAssignedRole(raw: string): Role | null {
   }
 }
 
+export type ContentType = "mythicplus" | "raid";
+// Single-letter raid difficulty code, exactly as the addon exports it (see
+// Core.lua's AssignedRoleCode-style GetCurrentInstanceInfo) -- "-" (Mythic+,
+// not applicable) never reaches this type, see parseClipboardText.
+export type RaidDifficultyCode = "N" | "H" | "M";
+
 // The addon exports "Name:Server:Role:ItemLevel:Score:SpecID:Name:Server:
-// Role:ItemLevel:Score:SpecID:...:Dungeon:EXPORT" (see Core.lua's
-// GetApplicantNames/QueueAnalyzer_RefreshExport) -- fixed sextuplets (Name,
-// Server, Blizzard's own item level, Blizzard's own in-game Mythic+ rating,
-// Blizzard's own assignedRole, Blizzard's own active spec ID) for every
-// applicant member, followed by ONE trailing Dungeon field (the leader's
-// current Keystone dungeon, empty if none -- see Core.lua's
-// GetCurrentDungeonName) and the "EXPORT" marker. SpecID is Blizzard's own
-// LIVE value (same call as everything else here, zero extra cost) -- lets
-// the RaiderIO Tier grade (lib/rioTier.ts) skip WCL's gameData lookup
-// entirely for characters the addon already told us the spec of, instead of
-// needing a slow forceUpdate call or accepting gaps where WCL hasn't
-// independently cached it (see lookupOne). Dungeon sits at the END, not
-// repeated per applicant, since it's a single value for the whole listing
-// -- repeating it per member would be pure waste. Name/Server are separate
+// Role:ItemLevel:Score:SpecID:...:Type:Difficulty:InstanceName:EXPORT" (see
+// Core.lua's GetApplicantNames/QueueAnalyzer_RefreshExport) -- fixed
+// sextuplets (Name, Server, Blizzard's own assignedRole, Blizzard's own
+// item level, Blizzard's own in-game Mythic+ rating, Blizzard's own active
+// spec ID) for every applicant member, followed by exactly THREE trailing
+// fields (Type: "M"|"R", Difficulty: "-"|"N"|"H"|"M", InstanceName) and the
+// "EXPORT" marker. SpecID is Blizzard's own LIVE value (same call as
+// everything else here, zero extra cost) -- lets the RaiderIO Tier grade
+// (lib/rioTier.ts) skip WCL's gameData lookup entirely for characters the
+// addon already told us the spec of, instead of needing a slow forceUpdate
+// call or accepting gaps where WCL hasn't independently cached it (see
+// lookupOne). Type/Difficulty/InstanceName sit at the END, not repeated per
+// applicant, since they're single values for the whole listing --
+// repeating them per member would be pure waste. Name/Server are separate
 // fields rather than one hyphenated "Name-Realm" string -- avoids ever
 // having to guess a split point on a realm name (some contain
 // non-ASCII/parenthesized parts).
@@ -191,7 +198,9 @@ function majorVersion(version: string): string {
 }
 
 export function parseClipboardText(rawText: string): {
-  dungeonName: string | null;
+  contentType: ContentType;
+  raidDifficultyCode: RaidDifficultyCode | null;
+  instanceName: string | null;
   entries: {
     key: string;
     blizzardScore: number;
@@ -202,7 +211,7 @@ export function parseClipboardText(rawText: string): {
 } {
   const trimmed = rawText.trim();
   if (trimmed === "") {
-    return { dungeonName: null, entries: [] };
+    return { contentType: "mythicplus", raidDifficultyCode: null, instanceName: null, entries: [] };
   }
   const markerMatch = /:e([^:]+)$/.exec(trimmed);
   if (!markerMatch) {
@@ -213,8 +222,14 @@ export function parseClipboardText(rawText: string): {
   }
 
   const tokens = trimmed.slice(0, -markerMatch[0].length).split(":");
-  const dungeonName = tokens[tokens.length - 1]?.trim() || null;
-  const memberTokens = tokens.slice(0, -1);
+  const instanceName = tokens[tokens.length - 1]?.trim() || null;
+  const difficultyToken = tokens[tokens.length - 2] ?? "-";
+  const contentType: ContentType = tokens[tokens.length - 3] === "R" ? "raid" : "mythicplus";
+  const raidDifficultyCode: RaidDifficultyCode | null =
+    contentType === "raid" && (difficultyToken === "N" || difficultyToken === "H" || difficultyToken === "M")
+      ? difficultyToken
+      : null;
+  const memberTokens = tokens.slice(0, -3);
 
   const entries: {
     key: string;
@@ -235,7 +250,7 @@ export function parseClipboardText(rawText: string): {
       addonSpecId: Number(memberTokens[i + 5]) || null,
     });
   }
-  return { dungeonName, entries };
+  return { contentType, raidDifficultyCode, instanceName, entries };
 }
 
 // Everyone gets a Log value now -- tanks and healers are no longer
@@ -264,7 +279,9 @@ async function lookupOne(
   addonRole: Role | null,
   addonSpecId: number | null,
   clientId: string,
-  clientSecret: string
+  clientSecret: string,
+  contentType: ContentType,
+  difficultyId: number | undefined
 ): Promise<LookupResult | null> {
   const key = `${name}-${realm}`;
   const slug = toServerSlug(realm);
@@ -283,7 +300,9 @@ async function lookupOne(
       clientId,
       clientSecret,
       encounterID,
-      addonRole
+      addonRole,
+      contentType,
+      difficultyId
     );
   } catch (err) {
     return {
@@ -495,14 +514,24 @@ export function withRanks(results: EffectiveResult[], logsWeight: number, ioWeig
   return results.map((r) => ({ ...r, rank: rankByKey.get(r.key) ?? 0 }));
 }
 
-// dungeonName: the addon-exported current Keystone dungeon (see
-// parseClipboardText), or null if there wasn't one. Always resolved and
-// fetched regardless of which mode the Season/Dungeon toggle is currently
-// in -- see LookupResult's comment for why (lets the toggle switch
-// instantly later without a re-lookup). An unrecognized name (not in the
-// current season's encounter list, or simply no active Keystone listing)
-// just leaves encounterID undefined below, so the dungeon-specific fields
-// end up 0 ("no data") rather than erroring.
+// WCL's own difficulty names (lowercased) for the current raid zone,
+// confirmed live -- keyed by the addon's single-letter export code (see
+// RaidDifficultyCode/Core.lua's GetCurrentInstanceInfo).
+const RAID_DIFFICULTY_NAME: Record<RaidDifficultyCode, string> = { N: "normal", H: "heroic", M: "mythic" };
+
+// contentType/instanceName/raidDifficultyCode: the addon-exported listing
+// info (see parseClipboardText). For Mythic+, instanceName is the current
+// Keystone dungeon (or null if none) -- an unrecognized name (not in the
+// current season's encounter list) just leaves encounterID undefined below,
+// so the dungeon-specific fields end up 0 ("no data") rather than erroring.
+// For raid, there's no per-boss detection at all (Group Finder doesn't
+// expose "which boss is this group working on", only the raid+difficulty --
+// see GetCurrentInstanceInfo's comment in Core.lua), so encounterID always
+// stays undefined and Dungeon-mode fields simply stay 0 for raid results,
+// same fallback as an unmatched Mythic+ dungeon name. difficulty IS
+// required for raid, unlike Mythic+ (see RaidZoneInfo's comment in
+// lib/wcl.ts) -- resolved here from the raid zone's own difficulty list,
+// not guessed.
 //
 // roleByKey: Blizzard's own assignedRole per applicant (see
 // parseClipboardText/parseAssignedRole), keyed by "Name-Realm" -- passed
@@ -517,15 +546,36 @@ export async function runLookup(
   rawNames: string[],
   clientId: string,
   clientSecret: string,
-  dungeonName: string | null,
+  contentType: ContentType,
+  instanceName: string | null,
+  raidDifficultyCode: RaidDifficultyCode | null,
   roleByKey: Map<string, Role | null>,
   specIdByKey: Map<string, number | null>
 ): Promise<LookupResult[]> {
-  const season = await getCurrentSeason(clientId, clientSecret);
-  if (!season.zoneID || !season.partition) {
-    throw new LookupError("CONFIG_INCOMPLETE");
+  let zoneID: number;
+  let partition: number;
+  let encounterID: number | undefined;
+  let difficultyId: number | undefined;
+
+  if (contentType === "raid") {
+    const raidZone = await getCurrentRaidZone(clientId, clientSecret);
+    difficultyId = raidDifficultyCode
+      ? raidZone?.difficultiesByName.get(RAID_DIFFICULTY_NAME[raidDifficultyCode])
+      : undefined;
+    if (!raidZone?.zoneID || !raidZone.partition || difficultyId == null) {
+      throw new LookupError("CONFIG_INCOMPLETE");
+    }
+    zoneID = raidZone.zoneID;
+    partition = raidZone.partition;
+  } else {
+    const season = await getCurrentSeason(clientId, clientSecret);
+    if (!season.zoneID || !season.partition) {
+      throw new LookupError("CONFIG_INCOMPLETE");
+    }
+    zoneID = season.zoneID;
+    partition = season.partition;
+    encounterID = instanceName ? season.encountersByName.get(instanceName.toLowerCase()) : undefined;
   }
-  const encounterID = dungeonName ? season.encountersByName.get(dungeonName.toLowerCase()) : undefined;
 
   const entries = rawNames
     .map((l) => l.trim())
@@ -546,13 +596,15 @@ export async function runLookup(
       lookupOne(
         name,
         realm,
-        season.zoneID,
-        season.partition,
+        zoneID,
+        partition,
         encounterID,
         roleByKey.get(`${name}-${realm}`) ?? null,
         specIdByKey.get(`${name}-${realm}`) ?? null,
         clientId,
-        clientSecret
+        clientSecret,
+        contentType,
+        difficultyId
       )
     ),
     getSpecTiers(REGION),

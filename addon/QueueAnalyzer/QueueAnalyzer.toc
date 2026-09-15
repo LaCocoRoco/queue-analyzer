@@ -2,7 +2,7 @@
 ## Title: Queue Analyzer
 ## Notes: Reads all applicant names of a group listing and shows them for copying.
 ## Author: Andreas
-## Version: 1.0.0
+## Version: 2.0.0
 ## DefaultState: enabled
 ## X-Curse-Project-ID: 1692771
 

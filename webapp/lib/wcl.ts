@@ -184,21 +184,39 @@ export interface SeasonInfo {
   encountersByName: Map<string, number>;
 }
 
+export interface RaidZoneInfo {
+  zoneID: number;
+  partition: number;
+  // Difficulty name (WCL's own spelling, lowercased: "normal"/"heroic"/
+  // "mythic"/"lfr") -> difficulty ID -- REQUIRED for a raid zoneRankings
+  // query, unlike Mythic+ where it doesn't apply at all (see
+  // getCharacterProfile). Confirmed live: omitting it doesn't default to
+  // "the raid's highest difficulty", it defaults to whichever difficulty
+  // THIS CHARACTER happens to have logs for at all, which silently picks
+  // e.g. old LFR data for someone who never ran Heroic -- not what "this
+  // applicant is applying to a Heroic group" needs.
+  difficultiesByName: Map<string, number>;
+}
+
 let cachedSeason: SeasonInfo | null = null;
+// undefined = not yet resolved, null = resolved and genuinely unavailable
+// (distinct states, so a failed detection isn't retried every call but also
+// isn't confused with "not checked yet").
+let cachedRaidZone: RaidZoneInfo | null | undefined = undefined;
 
 // Confirmed against WCL's own v2 schema docs (warcraftlogs.com/v2-api-docs):
 // Zone.frozen is permanently true once a zone's data can no longer change
 // (i.e. every past tier), so filtering to frozen: false alone narrows
 // "every zone from every expansion WCL has ever tracked" down to just the
 // small handful currently live. Zone.brackets.type further narrows to
-// specifically the Mythic+ one ("keystone" brackets, per the API's own
-// field description, vs. raids' item-level brackets). Zone.partitions[]
-// .default identifies the current partition within that zone without
-// needing to know its ID ahead of time. Together this is what makes the
-// zoneID/partition pair -- and the dungeon-name/encounterID map alongside
-// it -- self-updating across season transitions with no code change
-// needed, which is the whole point: this keeps working even if nobody is
-// around to bump NEXT_PUBLIC_WCL_ZONE_ID by hand next season.
+// specifically the Mythic+ one ("Keystone Level" brackets, confirmed live
+// -- raids use "Item Level" brackets instead, see getCurrentRaidZone below).
+// Zone.partitions[].default identifies the current partition within that
+// zone without needing to know its ID ahead of time. Together this is what
+// makes the zoneID/partition pair -- and the dungeon-name/encounterID map
+// alongside it -- self-updating across season transitions with no code
+// change needed, which is the whole point: this keeps working even if
+// nobody is around to bump NEXT_PUBLIC_WCL_ZONE_ID by hand next season.
 const CURRENT_SEASON_QUERY = `
 query {
   worldData {
@@ -208,6 +226,7 @@ query {
       brackets { type }
       partitions { id default }
       encounters { id name }
+      difficulties { id name }
     }
   }
 }`;
@@ -218,10 +237,27 @@ interface RawZone {
   brackets: { type: string | null } | null;
   partitions: { id: number; default: boolean }[] | null;
   encounters: { id: number; name: string }[] | null;
+  difficulties: { id: number; name: string }[] | null;
 }
 
 interface RawSeasonData {
   worldData: { zones: RawZone[] };
+}
+
+// Shared by getCurrentSeason and getCurrentRaidZone below -- both need the
+// exact same worldData.zones query, just filtered differently, so this
+// fetches it once (cached for the page's lifetime) instead of querying
+// twice. Never throws -- resolves to an empty array on any failure, so each
+// caller's own find()-then-fallback logic just naturally finds nothing and
+// degrades gracefully, same as before.
+let cachedZonesPromise: Promise<RawZone[]> | null = null;
+function getZones(clientId: string, clientSecret: string): Promise<RawZone[]> {
+  if (!cachedZonesPromise) {
+    cachedZonesPromise = wclGraphQL<RawSeasonData>(CURRENT_SEASON_QUERY, {}, clientId, clientSecret)
+      .then((data) => data.worldData.zones)
+      .catch(() => []);
+  }
+  return cachedZonesPromise;
 }
 
 // Resolves the current Mythic+ season's zoneID/partition and its
@@ -234,26 +270,45 @@ export async function getCurrentSeason(clientId: string, clientSecret: string): 
   if (cachedSeason) {
     return cachedSeason;
   }
-  try {
-    const data = await wclGraphQL<RawSeasonData>(CURRENT_SEASON_QUERY, {}, clientId, clientSecret);
-    const mplusZone = data.worldData.zones.find(
-      (z) => !z.frozen && (z.brackets?.type ?? "").toLowerCase().includes("keystone")
-    );
-    const defaultPartition = mplusZone?.partitions?.find((p) => p.default)?.id;
-    if (mplusZone && defaultPartition != null) {
-      cachedSeason = {
-        zoneID: mplusZone.id,
-        partition: defaultPartition,
-        encountersByName: new Map((mplusZone.encounters ?? []).map((e) => [e.name.toLowerCase(), e.id])),
-      };
-      return cachedSeason;
-    }
-  } catch {
-    // Fall through to the hardcoded fallback below -- network error, an
-    // unexpected schema shape, or genuinely no matching zone found.
+  const zones = await getZones(clientId, clientSecret);
+  const mplusZone = zones.find((z) => !z.frozen && (z.brackets?.type ?? "").toLowerCase().includes("keystone"));
+  const defaultPartition = mplusZone?.partitions?.find((p) => p.default)?.id;
+  if (mplusZone && defaultPartition != null) {
+    cachedSeason = {
+      zoneID: mplusZone.id,
+      partition: defaultPartition,
+      encountersByName: new Map((mplusZone.encounters ?? []).map((e) => [e.name.toLowerCase(), e.id])),
+    };
+    return cachedSeason;
   }
   cachedSeason = { zoneID: FALLBACK_ZONE_ID, partition: FALLBACK_PARTITION, encountersByName: new Map() };
   return cachedSeason;
+}
+
+// Same detection idea as getCurrentSeason, but for the current raid tier --
+// confirmed live against WCL's real data that the current raid zone ("The
+// Venomous Abyss") has brackets.type "Item Level" (vs Mythic+'s "Keystone
+// Level"), so the same frozen:false filter with the opposite bracket check
+// finds it. No hardcoded env-var fallback here, unlike Mythic+ -- guessing
+// a wrong raid zone ID would silently return another tier's data instead of
+// an obvious error, worse than just not offering raid lookups this session.
+export async function getCurrentRaidZone(clientId: string, clientSecret: string): Promise<RaidZoneInfo | null> {
+  if (cachedRaidZone !== undefined) {
+    return cachedRaidZone;
+  }
+  const zones = await getZones(clientId, clientSecret);
+  const raidZone = zones.find((z) => !z.frozen && z.brackets?.type === "Item Level");
+  const defaultPartition = raidZone?.partitions?.find((p) => p.default)?.id;
+  if (raidZone && defaultPartition != null) {
+    cachedRaidZone = {
+      zoneID: raidZone.id,
+      partition: defaultPartition,
+      difficultiesByName: new Map((raidZone.difficulties ?? []).map((d) => [d.name.toLowerCase(), d.id])),
+    };
+    return cachedRaidZone;
+  }
+  cachedRaidZone = null;
+  return cachedRaidZone;
 }
 
 export type Role = "tank" | "healer" | "dps";
@@ -393,11 +448,11 @@ export interface CharacterProfile {
 // forceUpdate: false) -- classId/specId/tier just stay null for whichever
 // characters WCL hasn't already cached on its own, same tradeoff as before.
 const CHARACTER_PROFILE_QUERY = `
-query($name: String!, $serverSlug: String!, $serverRegion: String!, $zoneID: Int!, $partition: Int!, $metric: CharacterPageRankingMetricType!) {
+query($name: String!, $serverSlug: String!, $serverRegion: String!, $zoneID: Int!, $partition: Int!, $metric: CharacterPageRankingMetricType!, $difficulty: Int) {
   characterData {
     character(name: $name, serverSlug: $serverSlug, serverRegion: $serverRegion) {
       gameData
-      zoneRankings(zoneID: $zoneID, partition: $partition, metric: $metric)
+      zoneRankings(zoneID: $zoneID, partition: $partition, metric: $metric, difficulty: $difficulty)
     }
   }
 }`;
@@ -484,20 +539,36 @@ export async function getCharacterProfile(
   // When given, also fetches this dungeon's own encounterRankings
   // alongside the season-wide zoneRankings (both fetched together, always,
   // regardless of which mode the UI is currently in -- see LookupResult's
-  // comment in lib/lookup.ts for why).
+  // comment in lib/lookup.ts for why). Never given for raid content -- see
+  // contentType's comment.
   encounterID?: number,
   // Healers get points_and_healing/hps instead of points_and_damage/dps --
   // everyone else (dps, tank, or unknown) gets the damage-based pair, since
   // a tank's Log value is still meant to reflect damage output, just
   // without being ranked against the DPS pool (see lib/lookup.ts).
-  role?: Role | null
+  role?: Role | null,
+  // points_and_damage/points_and_healing (WCL's own metric enum, confirmed
+  // against its docs: "Used by WoW Mythic+ and Fellowship") only apply to
+  // Mythic+ -- raid zoneRankings needs the plain dps/hps metric instead,
+  // confirmed live against a real raid zone. difficultyId is similarly
+  // Mythic+-irrelevant but REQUIRED for raid (see RaidZoneInfo's comment in
+  // this file for why omitting it is actively wrong, not just imprecise).
+  contentType: "mythicplus" | "raid" = "mythicplus",
+  difficultyId?: number
 ): Promise<CharacterProfile | null> {
-  const seasonMetric = role === "healer" ? "points_and_healing" : "points_and_damage";
+  const isRaid = contentType === "raid";
+  const seasonMetric = isRaid
+    ? role === "healer"
+      ? "hps"
+      : "dps"
+    : role === "healer"
+      ? "points_and_healing"
+      : "points_and_damage";
   const encounterMetric = role === "healer" ? "hps" : "dps";
   const [seasonData, encounterData] = await Promise.all([
     wclGraphQL<RawCharacterProfileData>(
       CHARACTER_PROFILE_QUERY,
-      { name, serverSlug, serverRegion, zoneID, partition, metric: seasonMetric },
+      { name, serverSlug, serverRegion, zoneID, partition, metric: seasonMetric, difficulty: isRaid ? difficultyId : undefined },
       clientId,
       clientSecret
     ),

@@ -41,13 +41,16 @@ StaticPopupDialogs["QUEUEANALYZER_WRONG_VERSION"] = {
 	hideOnEscape = true,
 }
 
----Returns the display name of the Mythic Keystone dungeon for your own
----current Group Finder listing (used by the webapp's Season/Dungeon toggle
----to look up dungeon-specific WarcraftLogs data instead of whole-season
----data), or nil if you have no active listing or it isn't a Keystone
----activity. Strips the trailing "(Mythic Keystone)"-style parenthetical
----Blizzard appends to the activity name, to match WarcraftLogs' own plain
----dungeon names as closely as possible.
+---Returns info about your own current Group Finder listing (used by the
+---webapp to decide whether to query WarcraftLogs' Mythic+ season data or a
+---specific raid zone/difficulty, instead of whole-season-only data), or nil
+---if you have no active listing or it's neither a Mythic+ Keystone nor a
+---raid activity (e.g. PvP, Quests -- WCL Log data doesn't apply). Strips the
+---trailing "(Mythic Keystone)"/"(Heroic)"-style parenthetical Blizzard
+---appends to the activity name, to match WarcraftLogs' own plain zone names
+---as closely as possible -- the difficulty itself comes from
+---activityInfo's own boolean flags below instead, not by parsing that
+---parenthetical.
 ---
 ---C_LFGList.GetActiveEntryInfo() returns `activityIDs` (plural, an array --
 ---confirmed against current API docs; the field used to be singular
@@ -56,8 +59,16 @@ StaticPopupDialogs["QUEUEANALYZER_WRONG_VERSION"] = {
 ---info, no "Table" suffix) is also deprecated and returns positional
 ---values, not a table -- GetActivityInfoTable() is the current table-based
 ---replacement and is what actually has a `.fullName` field.
----@return string|nil
-local function GetCurrentDungeonName()
+---
+---isNormalActivity/isHeroicActivity/isMythicActivity/isMythicPlusActivity
+---(confirmed against Blizzard's own LFGList.lua and the current API docs)
+---are exactly the fields Blizzard's own difficulty filter UI reads --
+---reliable, no need to parse the difficulty out of the activity name
+---ourselves. LFR is deliberately not handled -- Raid Finder groups aren't
+---organized through the Premade Groups applicant system this addon reads
+---from in the first place.
+---@return {type: "M"|"R", difficulty: string, name: string}|nil
+local function GetCurrentInstanceInfo()
 	local entry = C_LFGList.GetActiveEntryInfo()
 	if not entry or not entry.activityIDs or not entry.activityIDs[1] then
 		return nil
@@ -67,7 +78,20 @@ local function GetCurrentDungeonName()
 		return nil
 	end
 	local name = activityInfo.fullName:gsub("%s*%b()%s*$", "")
-	return name ~= "" and name or nil
+	if name == "" then
+		return nil
+	end
+
+	if activityInfo.isMythicPlusActivity then
+		return { type = "M", difficulty = "-", name = name }
+	elseif activityInfo.isMythicActivity then
+		return { type = "R", difficulty = "M", name = name }
+	elseif activityInfo.isHeroicActivity then
+		return { type = "R", difficulty = "H", name = name }
+	elseif activityInfo.isNormalActivity then
+		return { type = "R", difficulty = "N", name = name }
+	end
+	return nil
 end
 
 ---Collect Name, Server, Blizzard's own item level, Mythic+ rating, assigned
@@ -436,23 +460,30 @@ function QueueAnalyzer_RefreshExport()
 	end
 
 	local entries = GetApplicantNames()
-	local dungeonName = GetCurrentDungeonName() or ""
+	local instanceInfo = GetCurrentInstanceInfo()
+	local instanceType = instanceInfo and instanceInfo.type or "M"
+	local instanceDifficulty = instanceInfo and instanceInfo.difficulty or "-"
+	local instanceName = instanceInfo and instanceInfo.name or ""
 
 	-- One flat ":"-delimited string
-	-- ("Name:Server:Role:ItemLevel:Rating:SpecID:Name:Server:Role:ItemLevel:Rating:SpecID:...:DungeonName:e<version>")
+	-- ("Name:Server:Role:ItemLevel:Rating:SpecID:Name:Server:Role:ItemLevel:Rating:SpecID:...:Type:Difficulty:InstanceName:e<version>")
 	-- instead of separate lines -- easier to select/copy reliably as a
 	-- single line, and the webapp reads it back the same way (splits on
-	-- ":"; names/realms/dungeon names never contain ":"). The dungeon name
-	-- is always the LAST field before the marker when there's anything at
-	-- all to export, even if it's itself empty (no active Keystone
-	-- listing) -- it's a single value for the whole listing, not per
-	-- applicant, so it only needs to appear once; the webapp's
-	-- Season/Dungeon toggle needs a fixed position to read it from (see
-	-- lib/lookup.ts's parseClipboardText, which reads the LAST token before
-	-- the marker rather than assuming every group of 5 is a member). Truly
-	-- empty (no dungeon AND no applicants) stays a genuinely empty string,
-	-- not a stray marker -- that showed up in the Export field on every
-	-- addon startup before any listing existed.
+	-- ":"; names/realms/zone names never contain ":"). Type/Difficulty/
+	-- InstanceName are always the LAST three fields before the marker when
+	-- there's anything at all to export, even if empty/"-" (no active
+	-- listing, or a Mythic+ listing where Difficulty doesn't apply) -- a
+	-- single value for the whole listing, not per applicant, so each only
+	-- needs to appear once; the webapp needs a fixed position to read them
+	-- from (see lib/lookup.ts's parseClipboardText, which reads the LAST
+	-- three tokens before the marker rather than assuming every group of 6
+	-- is a member). Type defaults to "M" (not "R") when there's no active
+	-- listing at all -- matches the pre-existing "empty dungeon name falls
+	-- back to season-only data" behavior, just for Mythic+ specifically
+	-- rather than an undefined state. Truly empty (no listing AND no
+	-- applicants) stays a genuinely empty string, not a stray marker --
+	-- that showed up in the Export field on every addon startup before any
+	-- listing existed.
 	--
 	-- The trailing "e<version>" token (ADDON_VERSION -- see its own comment)
 	-- is a self-identifying, self-versioning marker: this string's own
@@ -465,8 +496,12 @@ function QueueAnalyzer_RefreshExport()
 	-- match this addon's own -- the webapp encodes which addon version it
 	-- was built against the same way.
 	local text = ""
-	if dungeonName ~= "" or #entries > 0 then
-		text = table.concat(entries, ":") .. ":" .. dungeonName .. ":e" .. ADDON_VERSION
+	if instanceName ~= "" or #entries > 0 then
+		text = table.concat(entries, ":")
+			.. ":" .. instanceType
+			.. ":" .. instanceDifficulty
+			.. ":" .. instanceName
+			.. ":e" .. ADDON_VERSION
 	end
 
 	frame.exportBox:SetText(text)

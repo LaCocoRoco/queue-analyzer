@@ -352,12 +352,14 @@ export default function LookupForm() {
       // throws (wrong version, garbage clipboard, etc.), Source should still
       // be able to hand back exactly what was actually read.
       setLastSourceText(rawText);
-      // The addon exports "DungeonName:Name-Realm:Rating:ItemLevel:..." now
-      // -- DungeonName is the leader's current Keystone dungeon (empty if
-      // none), Rating/ItemLevel are Blizzard's own in-game values (see
-      // Core.lua's GetApplicantNames/GetCurrentDungeonName), free with the
+      // The addon exports "...:Type:Difficulty:InstanceName:e<version>" now
+      // -- Type/Difficulty distinguish a Mythic+ listing from a raid one
+      // (and, for raid, which difficulty), InstanceName is the current
+      // Keystone dungeon or raid zone name (empty if no active listing).
+      // Rating/ItemLevel/Role/SpecID are Blizzard's own in-game values (see
+      // Core.lua's GetApplicantNames/GetCurrentInstanceInfo), free with the
       // same call that gets the name.
-      const { dungeonName, entries } = parseClipboardText(rawText);
+      const { contentType, raidDifficultyCode, instanceName, entries } = parseClipboardText(rawText);
       if (entries.length === 0) {
         throw new Error(t.errorNoNames);
       }
@@ -375,7 +377,9 @@ export default function LookupForm() {
         names,
         creds.clientId,
         creds.clientSecret,
-        dungeonName,
+        contentType,
+        instanceName,
+        raidDifficultyCode,
         roleByKey,
         specIdByKey
       );
