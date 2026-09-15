@@ -523,8 +523,16 @@ function QueueAnalyzer_ToggleFrame()
 		return
 	end
 
+	-- A clean start every time the window opens, rather than auto-refreshing
+	-- Export (which used to silently show whatever the applicant list
+	-- happened to be right now) and leaving Import holding onto whatever was
+	-- last pasted in there, possibly from a much earlier session -- both
+	-- read as stale/confusing leftovers instead of a fresh state. Export is
+	-- still one click away via the Refresh button, unchanged.
 	frame:Show()
-	QueueAnalyzer_RefreshExport()
+	frame.exportBox:SetText("")
+	frame.importBox:SetText("")
+	frame.status:SetText("")
 end
 
 SLASH_QUEUEANALYZER1 = "/qa"

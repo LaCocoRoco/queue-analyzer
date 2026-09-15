@@ -471,9 +471,9 @@ export default function LookupForm() {
           .
         </p>
         <p style={{ fontSize: 14, lineHeight: 1.6, color: "#aaa", margin: "0 0 10px" }}>
-          Application Name: <b>analyzer</b>
+          Application Name: <b>Queue Analyzer</b>
           <br />
-          Redirect URL: <b>http://analyzer.com</b>
+          Redirect URL: <b>https://lacocoroco.github.io/queue-analyzer/</b>
         </p>
         <p style={{ fontSize: 14, lineHeight: 1.6, color: "#aaa", margin: 0 }}>{t.introStore}</p>
 
