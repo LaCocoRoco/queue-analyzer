@@ -45,12 +45,7 @@ StaticPopupDialogs["QUEUEANALYZER_WRONG_VERSION"] = {
 ---webapp to decide whether to query WarcraftLogs' Mythic+ season data or a
 ---specific raid zone/difficulty, instead of whole-season-only data), or nil
 ---if you have no active listing or it's neither a Mythic+ Keystone nor a
----raid activity (e.g. PvP, Quests -- WCL Log data doesn't apply). Strips the
----trailing "(Mythic Keystone)"/"(Heroic)"-style parenthetical Blizzard
----appends to the activity name, to match WarcraftLogs' own plain zone names
----as closely as possible -- the difficulty itself comes from
----activityInfo's own boolean flags below instead, not by parsing that
----parenthetical.
+---raid activity (e.g. PvP, Quests -- WCL Log data doesn't apply).
 ---
 ---C_LFGList.GetActiveEntryInfo() returns `activityIDs` (plural, an array --
 ---confirmed against current API docs; the field used to be singular
@@ -60,13 +55,19 @@ StaticPopupDialogs["QUEUEANALYZER_WRONG_VERSION"] = {
 ---values, not a table -- GetActivityInfoTable() is the current table-based
 ---replacement and is what actually has a `.fullName` field.
 ---
----isNormalActivity/isHeroicActivity/isMythicActivity/isMythicPlusActivity
----(confirmed against Blizzard's own LFGList.lua and the current API docs)
----are exactly the fields Blizzard's own difficulty filter UI reads --
----reliable, no need to parse the difficulty out of the activity name
----ourselves. LFR is deliberately not handled -- Raid Finder groups aren't
----organized through the Premade Groups applicant system this addon reads
----from in the first place.
+---Difficulty is read TWO ways and either one firing is enough:
+---activityInfo's own isNormalActivity/isHeroicActivity/isMythicActivity
+---booleans, AND the "(Normal)"/"(Heroic)"/"(Mythic)" parenthetical suffix
+---Blizzard appends to fullName. The booleans looked like the more "correct"
+---API-driven signal on paper, but confirmed LIVE (a real self-posted
+---Normal-difficulty raid listing) that they don't reliably fire for every
+---raid listing -- the parenthetical text, which is always shown correctly
+---on-screen to the player either way, doesn't have that problem. Checking
+---both is strictly safer than either alone. isMythicPlusActivity is kept as
+---the sole Mythic+ signal (well-established, no evidence it's unreliable).
+---LFR is deliberately not handled -- Raid Finder groups aren't organized
+---through the Premade Groups applicant system this addon reads from in the
+---first place.
 ---@return {type: "M"|"R", difficulty: string, name: string}|nil
 local function GetCurrentInstanceInfo()
 	local entry = C_LFGList.GetActiveEntryInfo()
@@ -77,6 +78,7 @@ local function GetCurrentInstanceInfo()
 	if not activityInfo or not activityInfo.fullName then
 		return nil
 	end
+	local suffix = (activityInfo.fullName:match("%((.-)%)%s*$") or ""):lower()
 	local name = activityInfo.fullName:gsub("%s*%b()%s*$", "")
 	if name == "" then
 		return nil
@@ -84,14 +86,20 @@ local function GetCurrentInstanceInfo()
 
 	if activityInfo.isMythicPlusActivity then
 		return { type = "M", difficulty = "-", name = name }
-	elseif activityInfo.isMythicActivity then
-		return { type = "R", difficulty = "M", name = name }
-	elseif activityInfo.isHeroicActivity then
-		return { type = "R", difficulty = "H", name = name }
-	elseif activityInfo.isNormalActivity then
-		return { type = "R", difficulty = "N", name = name }
 	end
-	return nil
+
+	local difficulty
+	if suffix:find("heroic", 1, true) or activityInfo.isHeroicActivity then
+		difficulty = "H"
+	elseif suffix:find("mythic", 1, true) or activityInfo.isMythicActivity then
+		difficulty = "M"
+	elseif suffix:find("normal", 1, true) or activityInfo.isNormalActivity then
+		difficulty = "N"
+	end
+	if not difficulty then
+		return nil
+	end
+	return { type = "R", difficulty = difficulty, name = name }
 end
 
 ---Collect Name, Server, Blizzard's own item level, Mythic+ rating, assigned
@@ -688,10 +696,19 @@ end
 --   2. After the last role icon: the RaiderIO spec Tier grade
 --      (TierColorCode), for every applicant with a known spec grade,
 --      regardless of rank.
---   3. After Rating: log (PercentileColorCode), anchored to member.Rating.
---      Tanks/healers still get a Log value here now (see lib/lookup.ts) --
---      they just never have a rank (data.rank stays 0), so they never get
---      a Name-prefix star, but they still get a Tier grade and Log readout.
+--   3. Log (PercentileColorCode) -- anchored to member.Rating for Mythic+
+--      listings, which have a real Rating column there. Raid listings don't
+--      show a Rating column at all (confirmed live: member.Rating ends up
+--      positioned where the Invite button is instead, so anchoring there
+--      made our own readout render on top of it), so for raid this instead
+--      anchors after the Decline button -- confirmed live there's unused
+--      row space there specifically on raid listings (Mythic+'s Rating
+--      column has nothing to fill that space with on raid rows). Falls
+--      back to folding it into readout #2 if Decline isn't found for some
+--      reason. Tanks/healers still get a Log value here now (see
+--      lib/lookup.ts) -- they just never have a rank (data.rank stays 0),
+--      so they never get a Name-prefix star, but they still get a Tier
+--      grade and Log readout.
 local hookedApplicantReadouts = false
 local function HookApplicantReadouts()
 	if hookedApplicantReadouts or not LFGListApplicationViewer_UpdateApplicantMember then
@@ -740,13 +757,39 @@ local function HookApplicantReadouts()
 
 		-- Re-anchored every update (not just on creation) since which role
 		-- icon is the rightmost visible one can change between applicants.
+		local logText = PercentileColorCode(data.best) .. string.format("%02d", data.best) .. "|r"
+		local instanceInfo = GetCurrentInstanceInfo()
+		local isRaid = instanceInfo and instanceInfo.type == "R"
+
 		member.QueueAnalyzerTierReadout:ClearAllPoints()
 		member.QueueAnalyzerTierReadout:SetPoint("LEFT", GetLastRoleIcon(member), "RIGHT", 2, 0)
 		member.QueueAnalyzerTierReadout:SetText(TierColorCode(data.tier))
 
-		member.QueueAnalyzerRatingReadout:ClearAllPoints()
-		member.QueueAnalyzerRatingReadout:SetPoint("LEFT", member.Rating, "RIGHT", 2, 0)
-		member.QueueAnalyzerRatingReadout:SetText(PercentileColorCode(data.best) .. string.format("%02d", data.best) .. "|r")
+		if isRaid then
+			-- Invite/Decline are per-APPLICANT, not per-member (confirmed
+			-- against Blizzard's own LFGList.lua -- UpdateApplicant, not
+			-- UpdateApplicantMember, is what shows/hides them), so they live
+			-- on member's parent, not member itself. There's unused row
+			-- space to the right of Decline on raid listings specifically
+			-- (raid rows have no Rating column at all to fill it, unlike
+			-- Mythic+) -- confirmed live via screenshot. Falls back to
+			-- folding Log into the Tier readout instead of just dropping it
+			-- if DeclineButton isn't found for some reason (e.g. a future
+			-- Blizzard UI change).
+			local declineButton = member.DeclineButton or (member:GetParent() and member:GetParent().DeclineButton)
+			if declineButton then
+				member.QueueAnalyzerRatingReadout:ClearAllPoints()
+				member.QueueAnalyzerRatingReadout:SetPoint("LEFT", declineButton, "RIGHT", 4, 0)
+				member.QueueAnalyzerRatingReadout:SetText(logText)
+			else
+				member.QueueAnalyzerTierReadout:SetText(TierColorCode(data.tier) .. " " .. logText)
+				member.QueueAnalyzerRatingReadout:SetText("")
+			end
+		else
+			member.QueueAnalyzerRatingReadout:ClearAllPoints()
+			member.QueueAnalyzerRatingReadout:SetPoint("LEFT", member.Rating, "RIGHT", 2, 0)
+			member.QueueAnalyzerRatingReadout:SetText(logText)
+		end
 	end)
 end
 
