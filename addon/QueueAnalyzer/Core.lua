@@ -630,69 +630,86 @@ local function CreateQueueAnalyzerFrame()
 		archonScoreSlider, archonScoreLabel, archonScoreValue,
 	}
 
-	-- Disabled-state overlay for the Archon tab: a semi-transparent black
-	-- panel on a higher frame level than the sliders, with an explanatory
-	-- message -- shown whenever the Archon tab's data genuinely isn't
-	-- available right now (ArchonTooltip not installed, or a Mythic+
-	-- listing, which ArchonTooltip doesn't carry Log data for -- see
-	-- UpdateArchonOverlay). Covers exactly the tab's own content area, not
-	-- the whole window, so the tab row/title bar/status line stay usable.
-	local archonOverlay = CreateFrame("Frame", nil, f)
-	archonOverlay:SetPoint("TOPLEFT", f, "TOPLEFT", 4, -54)
-	archonOverlay:SetPoint("BOTTOMRIGHT", f, "TOPRIGHT", -4, -118)
-	archonOverlay:SetFrameLevel(f:GetFrameLevel() + 10)
-	f.archonOverlay = archonOverlay
-
-	local archonOverlayBg = archonOverlay:CreateTexture(nil, "BACKGROUND")
-	archonOverlayBg:SetAllPoints()
-	archonOverlayBg:SetColorTexture(0, 0, 0, 0.75)
-
-	local archonOverlayText = archonOverlay:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-	archonOverlayText:SetPoint("CENTER")
-	archonOverlayText:SetWidth(330)
+	-- Disabled-state message for the Archon tab -- shown (with the sliders
+	-- themselves greyed out and click-through, see UpdateArchonOverlay)
+	-- whenever the tab's data genuinely isn't available right now
+	-- (ArchonTooltip not installed, or a Mythic+ listing, which
+	-- ArchonTooltip doesn't carry Log data for at all). No background
+	-- panel -- a plain black rectangle over the sliders didn't read as
+	-- anything in particular; disabling the sliders directly (like any
+	-- other greyed-out UI control) plus this explanation is clearer.
+	local archonOverlayText = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+	archonOverlayText:SetPoint("TOPLEFT", f, "TOPLEFT", 20, -60)
+	archonOverlayText:SetPoint("TOPRIGHT", f, "TOPRIGHT", -20, -60)
 	archonOverlayText:SetJustifyH("CENTER")
-	archonOverlayText:SetJustifyV("MIDDLE")
+	archonOverlayText:SetJustifyV("TOP")
 	f.archonOverlayText = archonOverlayText
 
 	AddRepoFooter(f)
 
+	-- Whether the current listing is Mythic+/Raid (and whether ArchonTooltip
+	-- is even installed) can change WHILE this window stays open and the
+	-- Archon tab stays active -- e.g. switching from browsing Raids to
+	-- browsing Mythic+ Dungeons without closing the window (confirmed live:
+	-- the disabled state used to only refresh on the next tab click/window
+	-- open, so it lagged behind by however long until one of those
+	-- happened). Cheap enough (GetCurrentInstanceInfo is a couple of local,
+	-- non-network API calls) to just re-check on a short throttle instead
+	-- of hunting for the exact right Blizzard event to hook.
+	f.archonOverlayElapsed = 0
+	f:SetScript("OnUpdate", function(self, elapsed)
+		if self.activeTab ~= "archon" then
+			return
+		end
+		self.archonOverlayElapsed = self.archonOverlayElapsed + elapsed
+		if self.archonOverlayElapsed < 0.5 then
+			return
+		end
+		self.archonOverlayElapsed = 0
+		UpdateArchonOverlay(self)
+	end)
+
 	return f
 end
 
--- Shows/hides the Archon tab's disabled overlay based on whether its data
--- is actually usable right now: ArchonTooltip has to be installed AND
--- loaded, AND the current listing has to be a raid (ArchonTooltip's own
--- database doesn't carry Mythic+ Log data at all -- see the earlier
--- conversation this whole feature came out of). Colors match the two
--- brands being named -- best-effort approximations (this project's own
--- existing WCL-blue accent color, and the same violet already used
--- elsewhere in this addon for WoW's own Epic item-quality tier) rather than
--- pixel-verified logo colors; adjust once compared side-by-side in-game.
+-- Greys out (and disables mouse input on) the Archon tab's sliders, and
+-- shows an explanation, whenever its data genuinely isn't usable right now:
+-- ArchonTooltip has to be installed AND loaded, AND the current listing has
+-- to be a raid (ArchonTooltip's own database doesn't carry Mythic+ Log data
+-- at all -- see the earlier conversation this whole feature came out of).
+-- Colors match the two brands being named -- best-effort approximations
+-- (this project's own existing WCL-blue accent color, and the same violet
+-- already used elsewhere in this addon for WoW's own Epic item-quality
+-- tier) rather than pixel-verified logo colors; adjust once compared
+-- side-by-side in-game.
 UpdateArchonOverlay = function(f)
+	local disabledText
 	if not IsArchonTooltipLoaded() then
-		f.archonOverlayText:SetText("|cffa335eeArchon Tooltips|r addon not detected.")
-		f.archonOverlay:Show()
-		return
+		disabledText = "|cffa335eeArchon Tooltip|r Addon is missing."
+	else
+		local instanceInfo = GetCurrentInstanceInfo()
+		if not (instanceInfo and instanceInfo.type == "R") then
+			disabledText = "Mythic+ |cff3fc7ebWarcraftLogs|r is currently not supported in |cffa335eeArchon Tooltip|r."
+		end
 	end
 
-	local instanceInfo = GetCurrentInstanceInfo()
-	if not (instanceInfo and instanceInfo.type == "R") then
-		f.archonOverlayText:SetText(
-			"Mythic+ |cff3fc7ebWarcraftLogs|r is currently not supported in |cffa335eeArchon Tooltips|r."
-		)
-		f.archonOverlay:Show()
-		return
+	f.archonOverlayText:SetShown(disabledText ~= nil)
+	if disabledText then
+		f.archonOverlayText:SetText(disabledText)
 	end
 
-	f.archonOverlay:Hide()
+	local enabled = disabledText == nil
+	f.archonLogSlider:EnableMouse(enabled)
+	f.archonScoreSlider:EnableMouse(enabled)
+	for _, control in ipairs(f.archonControls) do
+		control:SetAlpha(enabled and 1 or 0.35)
+	end
 end
 
 -- Only one tab's controls are shown AND only one tab's data path is live at
--- once (see CreateQueueAnalyzerFrame's own comment for why) -- switching to
--- "webapp" doesn't just hide the sliders, it also re-hides the overlay
--- (irrelevant while that tab isn't visible) so it doesn't linger stale
--- underneath when you switch back later without anything having changed.
+-- once (see CreateQueueAnalyzerFrame's own comment for why).
 SetActiveTab = function(f, tab)
+	f.activeTab = tab
 	local isWebApp = tab == "webapp"
 
 	for _, control in ipairs(f.webAppControls) do
@@ -706,7 +723,7 @@ SetActiveTab = function(f, tab)
 	f.tabArchon:SetText((not isWebApp) and "|cffffffffArchon App|r" or "|cff888888Archon App|r")
 
 	if isWebApp then
-		f.archonOverlay:Hide()
+		f.archonOverlayText:Hide()
 	else
 		UpdateArchonOverlay(f)
 	end
