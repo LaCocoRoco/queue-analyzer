@@ -647,28 +647,6 @@ local function CreateQueueAnalyzerFrame()
 
 	AddRepoFooter(f)
 
-	-- Whether the current listing is Mythic+/Raid (and whether ArchonTooltip
-	-- is even installed) can change WHILE this window stays open and the
-	-- Archon tab stays active -- e.g. switching from browsing Raids to
-	-- browsing Mythic+ Dungeons without closing the window (confirmed live:
-	-- the disabled state used to only refresh on the next tab click/window
-	-- open, so it lagged behind by however long until one of those
-	-- happened). Cheap enough (GetCurrentInstanceInfo is a couple of local,
-	-- non-network API calls) to just re-check on a short throttle instead
-	-- of hunting for the exact right Blizzard event to hook.
-	f.archonOverlayElapsed = 0
-	f:SetScript("OnUpdate", function(self, elapsed)
-		if self.activeTab ~= "archon" then
-			return
-		end
-		self.archonOverlayElapsed = self.archonOverlayElapsed + elapsed
-		if self.archonOverlayElapsed < 0.5 then
-			return
-		end
-		self.archonOverlayElapsed = 0
-		UpdateArchonOverlay(self)
-	end)
-
 	return f
 end
 
@@ -682,6 +660,16 @@ end
 -- already used elsewhere in this addon for WoW's own Epic item-quality
 -- tier) rather than pixel-verified logo colors; adjust once compared
 -- side-by-side in-game.
+--
+-- Only called at window-open and tab-click (see SetActiveTab) -- explicitly
+-- NOT re-checked on a timer while the window stays open. GetActiveEntryInfo
+-- (which GetCurrentInstanceInfo reads) reflects YOUR OWN POSTED listing,
+-- not whichever category tab you're currently just looking at -- confirmed
+-- live it stays accurate to what's actually posted regardless of which tab
+-- you browse to without touching it, so re-polling on a timer added
+-- complexity without fixing anything real; it only ever changes when you
+-- post/delist/edit your own listing or open/click this window, both of
+-- which already trigger a re-check here.
 UpdateArchonOverlay = function(f)
 	local disabledText
 	if not IsArchonTooltipLoaded() then
