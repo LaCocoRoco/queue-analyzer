@@ -102,6 +102,71 @@ local function GetCurrentInstanceInfo()
 	return { type = "R", difficulty = difficulty, name = name }
 end
 
+-- Archon Tooltip integration (soft/optional dependency -- see .toc's
+-- OptionalDeps: this addon loads fine with or without ArchonTooltip
+-- installed, unlike a hard Dependencies: entry which would refuse to load
+-- at all without it). ArchonTooltip.GetProfile is a genuine PUBLIC global
+-- function (confirmed against ArchonTooltip's own Provider.lua source, not
+-- guessed) -- calling it directly, in the same Lua VM, is how we read its
+-- local raid Log database without ever touching its own bit-packed DB files
+-- ourselves (those are a custom binary format with lazy per-chunk
+-- decoding -- reimplementing that ourselves would be fragile and break on
+-- every one of Archon's own format updates).
+local function IsArchonTooltipLoaded()
+	return (C_AddOns and C_AddOns.IsAddOnLoaded and C_AddOns.IsAddOnLoaded("ArchonTooltip")) or false
+end
+
+---Best-effort lookup of a character's raid Log percentile from Archon
+---Tooltip's own local database, or nil if unavailable (Archon not
+---installed/loaded, or no data at all for this character).
+---
+---FIRST-PASS HEURISTIC -- needs live confirmation before trusting it: a
+---profile can carry data for MULTIPLE raid tiers at once (profile.sections,
+---one entry per zone the character has logs for), and Archon's own numeric
+---zoneId scheme isn't publicly documented anywhere. This picks the section
+---with the highest zoneId, assuming (not yet confirmed live) that newer
+---raid tiers get higher zoneIds the same way most of Blizzard's own ID
+---schemes work. Verify this actually resolves to the CURRENT tier once
+---tested against a real character with logs in more than one raid tier --
+---adjust here if it picks the wrong one.
+---@param name string
+---@param realm string
+---@return number|nil
+local function GetArchonBest(name, realm)
+	if not IsArchonTooltipLoaded() then
+		return nil
+	end
+	local api = _G.ArchonTooltip
+	if not api or not api.GetProfile then
+		return nil
+	end
+
+	-- pcall'd deliberately: this is a third-party addon's own function,
+	-- called with data (character names) it wasn't necessarily tested
+	-- against -- a bug or unexpected input on Archon's side should never be
+	-- able to break our own addon.
+	local ok, profile = pcall(api.GetProfile, name, realm)
+	if not ok or not profile then
+		return nil
+	end
+
+	-- profile.summary (progress-only, no percentile) and profile.sections
+	-- (detailed, per-zone/spec breakdown) are mutually exclusive -- see
+	-- ArchonTooltip's own Provider.lua parse() function.
+	if not profile.sections or #profile.sections == 0 then
+		return nil
+	end
+
+	local bestSection
+	for _, section in ipairs(profile.sections) do
+		if not bestSection or (section.zoneId or 0) > (bestSection.zoneId or 0) then
+			bestSection = section
+		end
+	end
+
+	return bestSection and bestSection.anySpecRankings and bestSection.anySpecRankings.bestAverage or nil
+end
+
 ---Collect Name, Server, Blizzard's own item level, Mythic+ rating, assigned
 ---role and spec ID for every member of every current applicant, as flat
 ---sextuplets (Name, Server, Role, ItemLevel, Rating, SpecID, repeating) --
@@ -349,6 +414,15 @@ local function AddRepoFooter(f)
 end
 
 local frame
+-- Forward-declared (assigned after CreateQueueAnalyzerFrame below) so the
+-- tab buttons' OnClick closures -- created INSIDE CreateQueueAnalyzerFrame,
+-- but only actually invoked much later, at click time -- can capture them
+-- as upvalues. Lua closures can only capture a local that's already been
+-- declared (even if not yet assigned) at the point the closure is created,
+-- not one declared later in the same file -- same reason `frame` itself is
+-- declared up here instead of where it's first assigned.
+local SetActiveTab
+local UpdateArchonOverlay
 
 -- One small window instead of two: an Export field (pre-filled, refreshed
 -- live from the current applicants) and an Import field (paste the
@@ -356,12 +430,22 @@ local frame
 -- one flat ":"-delimited line anyway (see GetApplicantNames/ParseImportText),
 -- so a big multi-line scrollable box was never actually needed and only
 -- made it fiddly to know where to click to select everything.
+--
+-- Two tabs share this one window instead of two separate frames (explicitly
+-- requested -- simpler than juggling two windows' visibility/position in
+-- sync): "Archon App" (Log/Score sliders, driven by ArchonTooltip's own
+-- local database -- no clipboard round-trip) and "Web App" (this Export/
+-- Import pair, the original WCL-webapp workflow). Only one tab's controls
+-- are ever live at once -- switching tabs doesn't just hide the other
+-- tab's controls, it's meant to stop that tab's own update logic too (see
+-- SetActiveTab), since ArchonTooltip's data and the webapp's imported data
+-- would otherwise both try to drive the same applicant-list readouts at
+-- once.
 local function CreateQueueAnalyzerFrame()
 	local f = CreateFrame("Frame", "QueueAnalyzerFrame", UIParent, "BasicFrameTemplateWithInset")
-	-- Shorter than the original -- the repo-link footer row moved into the
-	-- title bar itself (see AddRepoFooter), so there's no more dedicated
-	-- footer space to leave room for below the status line.
-	f:SetSize(380, 120)
+	-- Tall enough for: title bar, tab row, two rows of tab content
+	-- (Export/Import or the two sliders), and a status line.
+	f:SetSize(380, 150)
 	-- Docked to the right of the Group Finder window, bottom edges aligned
 	-- (not below it, not vertically centered on it either) -- RaiderIO's
 	-- own overlay panel sits to the right near the TOP of LFGListFrame, so
@@ -392,8 +476,29 @@ local function CreateQueueAnalyzerFrame()
 	f.title:SetPoint("LEFT", f.TitleBg, "LEFT", 5, 0)
 	f.title:SetText("Analyzer")
 
+	-- Tab row -- "Archon App" first/left (explicitly requested order),
+	-- "Web App" second/right. Plain UIPanelButtonTemplate buttons with the
+	-- active one's label recolored white and the inactive one grey (see
+	-- SetActiveTab) rather than Blizzard's PanelTemplates tab system --
+	-- that system depends on specific child-frame naming conventions
+	-- (panel:GetName().."Tab1" etc.) that add fragility for no benefit here,
+	-- and this addon's other controls are all plain templated buttons too.
+	local tabArchon = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+	tabArchon:SetSize(110, 20)
+	tabArchon:SetPoint("TOPLEFT", 16, -28)
+	tabArchon:SetScript("OnClick", function() SetActiveTab(f, "archon") end)
+	f.tabArchon = tabArchon
+
+	local tabWebApp = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+	tabWebApp:SetSize(110, 20)
+	tabWebApp:SetPoint("LEFT", tabArchon, "RIGHT", 6, 0)
+	tabWebApp:SetScript("OnClick", function() SetActiveTab(f, "webapp") end)
+	f.tabWebApp = tabWebApp
+
+	-- ===== "Web App" tab content: the original Export/Import pair =====
+
 	local exportLabel = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-	exportLabel:SetPoint("TOPLEFT", 16, -34)
+	exportLabel:SetPoint("TOPLEFT", 16, -58)
 	exportLabel:SetWidth(50)
 	exportLabel:SetJustifyH("LEFT")
 	exportLabel:SetText("Export")
@@ -457,9 +562,154 @@ local function CreateQueueAnalyzerFrame()
 	f.status:SetPoint("TOPLEFT", importLabel, "BOTTOMLEFT", 4, -8)
 	f.status:SetText("")
 
+	f.webAppControls = { exportLabel, exportBox, refreshButton, importLabel, importBox, importButton, f.status }
+
+	-- ===== "Archon App" tab content: Log/Score weight sliders =====
+	-- Same LOG/SCORE weighting concept as the webapp's own Filter sliders,
+	-- just driven by ArchonTooltip's local database instead -- see
+	-- GetArchonBest. Permanently shown for now (no separate Filter toggle
+	-- on this tab yet -- explicitly deferred, "fürs erste").
+
+	-- OptionsSliderTemplate's Low/High/Text regions are documented two ways
+	-- across WoW's own history: direct field access (slider.Low) and the
+	-- older global-name lookup (_G[slider:GetName().."Low"]). Both are
+	-- expected to work on modern retail, but this checks both -- and
+	-- tolerates neither being found -- rather than assuming one, since
+	-- getting this wrong would error out of CreateQueueAnalyzerFrame
+	-- entirely (no window at all), not just look wrong. Worst case if
+	-- neither is found: the stock "Low"/"High"/(no title) labels stay
+	-- visible instead of being blanked -- cosmetic, not a crash.
+	local function SetSliderRegionText(slider, suffix, text)
+		local region = slider[suffix] or _G[slider:GetName() .. suffix]
+		if region then
+			region:SetText(text)
+		end
+	end
+
+	local function CreateArchonSlider(key, labelText, anchorY)
+		local label = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+		label:SetPoint("TOPLEFT", 16, anchorY)
+		label:SetWidth(50)
+		label:SetJustifyH("LEFT")
+		label:SetText(labelText)
+
+		local valueText = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+		valueText:SetPoint("TOPRIGHT", -16, anchorY)
+		valueText:SetWidth(28)
+		valueText:SetJustifyH("RIGHT")
+		valueText:SetText("50")
+
+		local slider = CreateFrame("Slider", "QueueAnalyzerArchon" .. key .. "Slider", f, "OptionsSliderTemplate")
+		slider:SetHeight(17)
+		slider:SetPoint("LEFT", label, "RIGHT", 8, -2)
+		slider:SetPoint("RIGHT", valueText, "LEFT", -8, -2)
+		slider:SetMinMaxValues(0, 100)
+		slider:SetValueStep(5)
+		slider:SetObeyStepOnDrag(true)
+		-- OptionsSliderTemplate's own Low/High/Text labels are all blanked --
+		-- we supply our own label/valueText instead, styled to match the
+		-- rest of this addon's readouts rather than the stock options-menu
+		-- look.
+		SetSliderRegionText(slider, "Low", "")
+		SetSliderRegionText(slider, "High", "")
+		SetSliderRegionText(slider, "Text", "")
+		slider:SetValue(50)
+		slider:SetScript("OnValueChanged", function(self, value)
+			valueText:SetText(tostring(math.floor(value + 0.5)))
+		end)
+
+		return slider, label, valueText
+	end
+
+	local archonLogSlider, archonLogLabel, archonLogValue = CreateArchonSlider("Log", "LOG", -58)
+	local archonScoreSlider, archonScoreLabel, archonScoreValue = CreateArchonSlider("Score", "SCORE", -90)
+	f.archonLogSlider = archonLogSlider
+	f.archonScoreSlider = archonScoreSlider
+	f.archonControls = {
+		archonLogSlider, archonLogLabel, archonLogValue,
+		archonScoreSlider, archonScoreLabel, archonScoreValue,
+	}
+
+	-- Disabled-state overlay for the Archon tab: a semi-transparent black
+	-- panel on a higher frame level than the sliders, with an explanatory
+	-- message -- shown whenever the Archon tab's data genuinely isn't
+	-- available right now (ArchonTooltip not installed, or a Mythic+
+	-- listing, which ArchonTooltip doesn't carry Log data for -- see
+	-- UpdateArchonOverlay). Covers exactly the tab's own content area, not
+	-- the whole window, so the tab row/title bar/status line stay usable.
+	local archonOverlay = CreateFrame("Frame", nil, f)
+	archonOverlay:SetPoint("TOPLEFT", f, "TOPLEFT", 4, -54)
+	archonOverlay:SetPoint("BOTTOMRIGHT", f, "TOPRIGHT", -4, -118)
+	archonOverlay:SetFrameLevel(f:GetFrameLevel() + 10)
+	f.archonOverlay = archonOverlay
+
+	local archonOverlayBg = archonOverlay:CreateTexture(nil, "BACKGROUND")
+	archonOverlayBg:SetAllPoints()
+	archonOverlayBg:SetColorTexture(0, 0, 0, 0.75)
+
+	local archonOverlayText = archonOverlay:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+	archonOverlayText:SetPoint("CENTER")
+	archonOverlayText:SetWidth(330)
+	archonOverlayText:SetJustifyH("CENTER")
+	archonOverlayText:SetJustifyV("MIDDLE")
+	f.archonOverlayText = archonOverlayText
+
 	AddRepoFooter(f)
 
 	return f
+end
+
+-- Shows/hides the Archon tab's disabled overlay based on whether its data
+-- is actually usable right now: ArchonTooltip has to be installed AND
+-- loaded, AND the current listing has to be a raid (ArchonTooltip's own
+-- database doesn't carry Mythic+ Log data at all -- see the earlier
+-- conversation this whole feature came out of). Colors match the two
+-- brands being named -- best-effort approximations (this project's own
+-- existing WCL-blue accent color, and the same violet already used
+-- elsewhere in this addon for WoW's own Epic item-quality tier) rather than
+-- pixel-verified logo colors; adjust once compared side-by-side in-game.
+UpdateArchonOverlay = function(f)
+	if not IsArchonTooltipLoaded() then
+		f.archonOverlayText:SetText("|cffa335eeArchon Tooltips|r addon not detected.")
+		f.archonOverlay:Show()
+		return
+	end
+
+	local instanceInfo = GetCurrentInstanceInfo()
+	if not (instanceInfo and instanceInfo.type == "R") then
+		f.archonOverlayText:SetText(
+			"Mythic+ |cff3fc7ebWarcraftLogs|r is currently not supported in |cffa335eeArchon Tooltips|r."
+		)
+		f.archonOverlay:Show()
+		return
+	end
+
+	f.archonOverlay:Hide()
+end
+
+-- Only one tab's controls are shown AND only one tab's data path is live at
+-- once (see CreateQueueAnalyzerFrame's own comment for why) -- switching to
+-- "webapp" doesn't just hide the sliders, it also re-hides the overlay
+-- (irrelevant while that tab isn't visible) so it doesn't linger stale
+-- underneath when you switch back later without anything having changed.
+SetActiveTab = function(f, tab)
+	local isWebApp = tab == "webapp"
+
+	for _, control in ipairs(f.webAppControls) do
+		control:SetShown(isWebApp)
+	end
+	for _, control in ipairs(f.archonControls) do
+		control:SetShown(not isWebApp)
+	end
+
+	f.tabWebApp:SetText(isWebApp and "|cffffffffWeb App|r" or "|cff888888Web App|r")
+	f.tabArchon:SetText((not isWebApp) and "|cffffffffArchon App|r" or "|cff888888Archon App|r")
+
+	if isWebApp then
+		f.archonOverlay:Hide()
+	else
+		UpdateArchonOverlay(f)
+	end
 end
 
 function QueueAnalyzer_RefreshExport()
@@ -541,6 +791,17 @@ function QueueAnalyzer_ToggleFrame()
 	frame.exportBox:SetText("")
 	frame.importBox:SetText("")
 	frame.status:SetText("")
+
+	-- Default tab follows the current listing: Raid opens straight to
+	-- "Archon App" (works today), Mythic+ (or no active listing at all)
+	-- opens to "Web App" (Archon doesn't support Mythic+ yet -- explicitly
+	-- requested default, "sollte sich jemand wundern warum kann er in der
+	-- Tab selber nachlesen wo das Problem liegt" -- so opening straight to
+	-- the disabled Archon tab for Mythic+ would bury that explanation
+	-- instead of surfacing it).
+	local instanceInfo = GetCurrentInstanceInfo()
+	local defaultTab = (instanceInfo and instanceInfo.type == "R") and "archon" or "webapp"
+	SetActiveTab(frame, defaultTab)
 end
 
 SLASH_QUEUEANALYZER1 = "/qa"
