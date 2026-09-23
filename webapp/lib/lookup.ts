@@ -8,7 +8,6 @@
 import {
   CLASS_ID_BY_SPEC_ID,
   getCharacterProfile,
-  getCurrentRaidZone,
   getCurrentSeason,
   hasData,
   runsEstimate,
@@ -37,7 +36,7 @@ const CONCURRENCY = 10;
 // ParseImportText) -- so either side running a mismatched build gets a
 // clear "wrong version" error instead of silently misreading a format it
 // doesn't actually speak.
-export const EXPECTED_ADDON_VERSION = "2.0.0";
+export const EXPECTED_ADDON_VERSION = "3.0.0";
 
 // Thrown for the user-facing failure cases here, carrying a stable code
 // instead of a hardcoded-language message -- the UI maps the code to the
@@ -156,30 +155,28 @@ function parseAssignedRole(raw: string): Role | null {
   }
 }
 
-export type ContentType = "mythicplus" | "raid";
-// Single-letter raid difficulty code, exactly as the addon exports it (see
-// Core.lua's AssignedRoleCode-style GetCurrentInstanceInfo) -- "-" (Mythic+,
-// not applicable) never reaches this type, see parseClipboardText.
-export type RaidDifficultyCode = "N" | "H" | "M";
-
 // The addon exports "Name:Server:Role:ItemLevel:Score:SpecID:Name:Server:
-// Role:ItemLevel:Score:SpecID:...:Type:Difficulty:InstanceName:EXPORT" (see
+// Role:ItemLevel:Score:SpecID:...:DungeonName:KeyLevel:EXPORT" (see
 // Core.lua's GetApplicantNames/QueueAnalyzer_RefreshExport) -- fixed
 // sextuplets (Name, Server, Blizzard's own assignedRole, Blizzard's own
 // item level, Blizzard's own in-game Mythic+ rating, Blizzard's own active
-// spec ID) for every applicant member, followed by exactly THREE trailing
-// fields (Type: "M"|"R", Difficulty: "-"|"N"|"H"|"M", InstanceName) and the
+// spec ID) for every applicant member, followed by exactly TWO trailing
+// fields (DungeonName, KeyLevel: "0" when unknown, never omitted) and the
 // "EXPORT" marker. SpecID is Blizzard's own LIVE value (same call as
 // everything else here, zero extra cost) -- lets the RaiderIO Tier grade
 // (lib/rioTier.ts) skip WCL's gameData lookup entirely for characters the
 // addon already told us the spec of, instead of needing a slow forceUpdate
 // call or accepting gaps where WCL hasn't independently cached it (see
-// lookupOne). Type/Difficulty/InstanceName sit at the END, not repeated per
-// applicant, since they're single values for the whole listing --
-// repeating them per member would be pure waste. Name/Server are separate
-// fields rather than one hyphenated "Name-Realm" string -- avoids ever
-// having to guess a split point on a realm name (some contain
-// non-ASCII/parenthesized parts).
+// lookupOne). KeyLevel is the addon's best guess at the target Mythic+ key
+// level for the CURRENT listing (parsed from the leader's own listing
+// comment, or the leader's held keystone as a fallback -- see Core.lua's
+// GetTargetKeystoneLevel) -- used below to compute a context-appropriate
+// Score ceiling instead of the fixed absolute one (see computeIoCeiling).
+// DungeonName/KeyLevel sit at the END, not repeated per applicant, since
+// they're single values for the whole listing -- repeating them per member
+// would be pure waste. Name/Server are separate fields rather than one
+// hyphenated "Name-Realm" string -- avoids ever having to guess a split
+// point on a realm name (some contain non-ASCII/parenthesized parts).
 //
 // The trailing "e<version>" marker is what toExportString below writes back
 // as "i<version>" instead -- the two formats used to be similar enough in
@@ -198,9 +195,12 @@ function majorVersion(version: string): string {
 }
 
 export function parseClipboardText(rawText: string): {
-  contentType: ContentType;
-  raidDifficultyCode: RaidDifficultyCode | null;
   instanceName: string | null;
+  // The addon's best guess at the target Mythic+ key level for the current
+  // listing (see the format comment above), or null when the addon sent
+  // "0" (no readable comment and no held keystone either) -- callers fall
+  // back to the static IO_SCORE_CEILING via computeIoCeiling in that case.
+  targetKeyLevel: number | null;
   entries: {
     key: string;
     blizzardScore: number;
@@ -211,7 +211,7 @@ export function parseClipboardText(rawText: string): {
 } {
   const trimmed = rawText.trim();
   if (trimmed === "") {
-    return { contentType: "mythicplus", raidDifficultyCode: null, instanceName: null, entries: [] };
+    return { instanceName: null, targetKeyLevel: null, entries: [] };
   }
   const markerMatch = /:e([^:]+)$/.exec(trimmed);
   if (!markerMatch) {
@@ -222,14 +222,10 @@ export function parseClipboardText(rawText: string): {
   }
 
   const tokens = trimmed.slice(0, -markerMatch[0].length).split(":");
-  const instanceName = tokens[tokens.length - 1]?.trim() || null;
-  const difficultyToken = tokens[tokens.length - 2] ?? "-";
-  const contentType: ContentType = tokens[tokens.length - 3] === "R" ? "raid" : "mythicplus";
-  const raidDifficultyCode: RaidDifficultyCode | null =
-    contentType === "raid" && (difficultyToken === "N" || difficultyToken === "H" || difficultyToken === "M")
-      ? difficultyToken
-      : null;
-  const memberTokens = tokens.slice(0, -3);
+  const keyLevelToken = Number(tokens[tokens.length - 1]);
+  const targetKeyLevel = Number.isFinite(keyLevelToken) && keyLevelToken >= 2 ? keyLevelToken : null;
+  const instanceName = tokens[tokens.length - 2]?.trim() || null;
+  const memberTokens = tokens.slice(0, -2);
 
   const entries: {
     key: string;
@@ -250,7 +246,7 @@ export function parseClipboardText(rawText: string): {
       addonSpecId: Number(memberTokens[i + 5]) || null,
     });
   }
-  return { contentType, raidDifficultyCode, instanceName, entries };
+  return { instanceName, targetKeyLevel, entries };
 }
 
 // Everyone gets a Log value now -- tanks and healers are no longer
@@ -279,9 +275,7 @@ async function lookupOne(
   addonRole: Role | null,
   addonSpecId: number | null,
   clientId: string,
-  clientSecret: string,
-  contentType: ContentType,
-  difficultyId: number | undefined
+  clientSecret: string
 ): Promise<LookupResult | null> {
   const key = `${name}-${realm}`;
   const slug = toServerSlug(realm);
@@ -291,19 +285,7 @@ async function lookupOne(
 
   let profile;
   try {
-    profile = await getCharacterProfile(
-      name,
-      slug,
-      REGION,
-      zoneID,
-      partition,
-      clientId,
-      clientSecret,
-      encounterID,
-      addonRole,
-      contentType,
-      difficultyId
-    );
+    profile = await getCharacterProfile(name, slug, REGION, zoneID, partition, clientId, clientSecret, encounterID, addonRole);
   } catch (err) {
     return {
       key,
@@ -458,18 +440,94 @@ export interface ScoredResult extends EffectiveResult {
   score: number;
 }
 
-// Score (raider.io or Blizzard's in-game rating) is normalized against this
-// fixed absolute scale, not min-max'd across the current applicant batch --
-// confirmed live that min-max was the actual bug behind "unranked stayed
-// ranked": a batch where every applicant's score already sits close together
-// (e.g. 2535-2588) got stretched to fill the WHOLE 0-100 range regardless,
-// so a trivial real difference in Score could swamp a huge, meaningful
-// difference in Log (like 0 vs 37). A fixed ceiling keeps a tight cluster of
-// real scores mapping to a correspondingly tight cluster of ioNorm, so Log
-// isn't drowned out by noise. 4000 is comfortably above what the current
-// Mythic+ scoring curve produces for a realistic top-end player; clamped to
-// 100 in case a future season's scores creep past it anyway.
+// Score (raider.io or Blizzard's in-game rating) is normalized against a
+// ceiling, not min-max'd across the current applicant batch -- confirmed
+// live that min-max was the actual bug behind "unranked stayed ranked": a
+// batch where every applicant's score already sits close together (e.g.
+// 2535-2588) got stretched to fill the WHOLE 0-100 range regardless, so a
+// trivial real difference in Score could swamp a huge, meaningful
+// difference in Log (like 0 vs 37). A ceiling keeps a tight cluster of real
+// scores mapping to a correspondingly tight cluster of ioNorm, so Log isn't
+// drowned out by noise.
+//
+// This fixed 4000 value is only the FALLBACK now (see computeIoCeiling
+// below) -- comfortably above what the current Mythic+ scoring curve
+// produces for a realistic top-end player, used when there's no target key
+// level to work from at all (no active Mythic+ listing, an unreadable
+// listing comment, no held keystone either, or a raid listing where the
+// concept doesn't apply). Using the absolute season maximum as the ceiling
+// for EVERY lookup was itself the actual problem being fixed here: a group
+// recruiting for a +10 isn't looking for players near the +30 ceiling, so
+// comparing their Score against 4000 understated how good a fitting
+// applicant's Score already was relative to Log.
 const IO_SCORE_CEILING = 4000;
+
+// RaiderIO's own published PER-DUNGEON base score, by keystone level
+// (support.raider.io, "What is the base score value for each level
+// keystone?") -- this is the score for a run that finishes right at the
+// time limit, no upgrade bonus. +21 and up isn't published level-by-level,
+// just as a flat +15/level climb from +20's 485, so that part is a formula
+// instead of a table lookup.
+const BASE_SCORE_BY_KEY_LEVEL: Record<number, number> = {
+  2: 155,
+  3: 170,
+  4: 200,
+  5: 215,
+  6: 230,
+  7: 260,
+  8: 275,
+  9: 290,
+  10: 320,
+  11: 335,
+  12: 365,
+  13: 380,
+  14: 395,
+  15: 410,
+  16: 425,
+  17: 440,
+  18: 455,
+  19: 470,
+  20: 485,
+};
+
+function baseScoreForKeyLevel(level: number): number {
+  const rounded = Math.round(level);
+  if (rounded <= 2) return BASE_SCORE_BY_KEY_LEVEL[2];
+  if (rounded <= 20) return BASE_SCORE_BY_KEY_LEVEL[rounded];
+  return 500 + (rounded - 21) * 15;
+}
+
+// raider.io's displayed Score is a SUM across the season's whole dungeon
+// pool, one score per dungeon, not an average -- confirmed by the numbers
+// lining up: the per-dungeon base score at the current season's highest
+// commonly-pushed levels, times the current pool size, lands right around
+// what a real top-end character's total Score actually looks like.
+// Multiplying the target key level's base score by the CURRENT season's
+// dungeon count therefore gives a rough "what would a character who's
+// appropriately geared/skilled for THIS key actually have" ceiling, rather
+// than comparing every applicant against the absolute maximum regardless of
+// what's being recruited for. Falls back to the fixed IO_SCORE_CEILING
+// whenever either input is missing -- no key level detected, or the season's
+// dungeon count couldn't be resolved (see getMythicPlusDungeonCount).
+export function computeIoCeiling(targetKeyLevel: number | null, dungeonCount: number | null): number {
+  if (!targetKeyLevel || !dungeonCount || dungeonCount <= 0) {
+    return IO_SCORE_CEILING;
+  }
+  return baseScoreForKeyLevel(targetKeyLevel) * dungeonCount;
+}
+
+// Thin wrapper around getCurrentSeason (lib/wcl.ts) purely for its dungeon
+// COUNT -- WCL's own worldData.zones query already returns the current
+// Mythic+ season's full dungeon-name -> encounterID map (needed anyway for
+// Dungeon-mode lookups), so this rides along on the same cached promise
+// instead of costing a separate request. Returns null (not 0) if detection
+// ever falls back to the hardcoded env vars (empty encounter map) -- see
+// computeIoCeiling for why that has to fall back to the static ceiling
+// rather than treating an unknown pool size as "1 dungeon."
+export async function getMythicPlusDungeonCount(clientId: string, clientSecret: string): Promise<number | null> {
+  const season = await getCurrentSeason(clientId, clientSecret);
+  return season.encountersByName.size || null;
+}
 
 // Combines WCL's Best percentile (already 0-100) with raider.io's Mythic+
 // score into one weighted value, for the optional "Filter" ranking mode.
@@ -479,12 +537,17 @@ const IO_SCORE_CEILING = 4000;
 // A character raider.io has no profile for gets ioNorm 0 (worst case)
 // rather than being skipped or given a free-pass average -- an unknown
 // score shouldn't rank the same as a verified middling one.
-export function rankResults(results: EffectiveResult[], logsWeight: number, ioWeight: number): ScoredResult[] {
+export function rankResults(
+  results: EffectiveResult[],
+  logsWeight: number,
+  ioWeight: number,
+  ioCeiling: number = IO_SCORE_CEILING
+): ScoredResult[] {
   const totalWeight = logsWeight + ioWeight;
 
   const scored: ScoredResult[] = results.map((r) => {
     const logsNorm = r.best;
-    const ioNorm = r.ioScore <= 0 ? 0 : Math.min(100, (r.ioScore / IO_SCORE_CEILING) * 100);
+    const ioNorm = r.ioScore <= 0 ? 0 : Math.min(100, (r.ioScore / ioCeiling) * 100);
     const score = totalWeight > 0 ? (logsWeight * logsNorm + ioWeight * ioNorm) / totalWeight : 0;
     return { ...r, score };
   });
@@ -507,31 +570,22 @@ export interface RankedResult extends EffectiveResult {
 // applicants") and get rank 0 -- the same sentinel already used for
 // "Filter wasn't on for this export", so the addon-side display/coloring
 // logic doesn't need a separate code path for it.
-export function withRanks(results: EffectiveResult[], logsWeight: number, ioWeight: number): RankedResult[] {
+export function withRanks(
+  results: EffectiveResult[],
+  logsWeight: number,
+  ioWeight: number,
+  ioCeiling: number = IO_SCORE_CEILING
+): RankedResult[] {
   const rankable = results.filter((r) => r.role !== "tank" && r.role !== "healer");
-  const scored = rankResults(rankable, logsWeight, ioWeight);
+  const scored = rankResults(rankable, logsWeight, ioWeight, ioCeiling);
   const rankByKey = new Map(scored.map((r, i) => [r.key, i + 1]));
   return results.map((r) => ({ ...r, rank: rankByKey.get(r.key) ?? 0 }));
 }
 
-// WCL's own difficulty names (lowercased) for the current raid zone,
-// confirmed live -- keyed by the addon's single-letter export code (see
-// RaidDifficultyCode/Core.lua's GetCurrentInstanceInfo).
-const RAID_DIFFICULTY_NAME: Record<RaidDifficultyCode, string> = { N: "normal", H: "heroic", M: "mythic" };
-
-// contentType/instanceName/raidDifficultyCode: the addon-exported listing
-// info (see parseClipboardText). For Mythic+, instanceName is the current
-// Keystone dungeon (or null if none) -- an unrecognized name (not in the
+// instanceName: the addon-exported current Keystone dungeon (see
+// parseClipboardText), or null if none -- an unrecognized name (not in the
 // current season's encounter list) just leaves encounterID undefined below,
 // so the dungeon-specific fields end up 0 ("no data") rather than erroring.
-// For raid, there's no per-boss detection at all (Group Finder doesn't
-// expose "which boss is this group working on", only the raid+difficulty --
-// see GetCurrentInstanceInfo's comment in Core.lua), so encounterID always
-// stays undefined and Dungeon-mode fields simply stay 0 for raid results,
-// same fallback as an unmatched Mythic+ dungeon name. difficulty IS
-// required for raid, unlike Mythic+ (see RaidZoneInfo's comment in
-// lib/wcl.ts) -- resolved here from the raid zone's own difficulty list,
-// not guessed.
 //
 // roleByKey: Blizzard's own assignedRole per applicant (see
 // parseClipboardText/parseAssignedRole), keyed by "Name-Realm" -- passed
@@ -546,36 +600,17 @@ export async function runLookup(
   rawNames: string[],
   clientId: string,
   clientSecret: string,
-  contentType: ContentType,
   instanceName: string | null,
-  raidDifficultyCode: RaidDifficultyCode | null,
   roleByKey: Map<string, Role | null>,
   specIdByKey: Map<string, number | null>
 ): Promise<LookupResult[]> {
-  let zoneID: number;
-  let partition: number;
-  let encounterID: number | undefined;
-  let difficultyId: number | undefined;
-
-  if (contentType === "raid") {
-    const raidZone = await getCurrentRaidZone(clientId, clientSecret);
-    difficultyId = raidDifficultyCode
-      ? raidZone?.difficultiesByName.get(RAID_DIFFICULTY_NAME[raidDifficultyCode])
-      : undefined;
-    if (!raidZone?.zoneID || !raidZone.partition || difficultyId == null) {
-      throw new LookupError("CONFIG_INCOMPLETE");
-    }
-    zoneID = raidZone.zoneID;
-    partition = raidZone.partition;
-  } else {
-    const season = await getCurrentSeason(clientId, clientSecret);
-    if (!season.zoneID || !season.partition) {
-      throw new LookupError("CONFIG_INCOMPLETE");
-    }
-    zoneID = season.zoneID;
-    partition = season.partition;
-    encounterID = instanceName ? season.encountersByName.get(instanceName.toLowerCase()) : undefined;
+  const season = await getCurrentSeason(clientId, clientSecret);
+  if (!season.zoneID || !season.partition) {
+    throw new LookupError("CONFIG_INCOMPLETE");
   }
+  const zoneID = season.zoneID;
+  const partition = season.partition;
+  const encounterID = instanceName ? season.encountersByName.get(instanceName.toLowerCase()) : undefined;
 
   const entries = rawNames
     .map((l) => l.trim())
@@ -602,9 +637,7 @@ export async function runLookup(
         roleByKey.get(`${name}-${realm}`) ?? null,
         specIdByKey.get(`${name}-${realm}`) ?? null,
         clientId,
-        clientSecret,
-        contentType,
-        difficultyId
+        clientSecret
       )
     ),
     getSpecTiers(REGION),

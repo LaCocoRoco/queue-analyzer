@@ -2,7 +2,7 @@
 ## Title: Queue Analyzer
 ## Notes: Reads all applicant names of a group listing and shows them for copying.
 ## Author: Andreas
-## Version: 2.0.4
+## Version: 3.0.0
 ## DefaultState: enabled
 ## IconTexture: Interface/AddOns/QueueAnalyzer/logo.tga
 ## X-Curse-Project-ID: 1692771

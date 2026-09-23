@@ -4,8 +4,10 @@ import { useEffect, useState, type CSSProperties } from "react";
 import { clearCredentials, loadCredentials, saveCredentials, type WclCredentials } from "@/lib/credentials";
 import { detectLocale, DICTS, DEFAULT_LOCALE } from "@/lib/i18n";
 import {
+  computeIoCeiling,
   EXPECTED_ADDON_VERSION,
   fetchRioScores,
+  getMythicPlusDungeonCount,
   LookupError,
   parseClipboardText,
   REGION,
@@ -219,8 +221,27 @@ export default function LookupForm() {
   // GetCurrentDungeonName) via encounterRankings instead -- see
   // runLookup/getCurrentSeason in lib/lookup.ts and lib/wcl.ts.
   const [dungeonMode, setDungeonMode] = useState<"season" | "dungeon">("season");
-  const [logsWeight, setLogsWeight] = useState(50);
-  const [ioWeight, setIoWeight] = useState(50);
+  // Single slider instead of two independent ones -- LOG on the left, SCORE
+  // on the right, center (50) is an even 50/50 split. Two separate 0-100
+  // sliders used to let you set e.g. both to 0 (a no-op blend) or both to
+  // 100 (also just a 50/50 blend, since rankResults normalizes by their
+  // sum) -- confusing, since the two knobs didn't actually add a second
+  // independent dimension, just two different-looking ways to express the
+  // same one-dimensional LOG<->SCORE balance. logsWeight/ioWeight below are
+  // derived from this single value (not stored separately) so the rest of
+  // the ranking code (runLookup, rankResults, etc.) doesn't need to change.
+  const [scoreBalance, setScoreBalance] = useState(50);
+  const logsWeight = 100 - scoreBalance;
+  const ioWeight = scoreBalance;
+
+  // The ceiling Score is normalized against for ranking (see rankResults in
+  // lib/lookup.ts) -- recomputed on every successful Import from the
+  // addon-detected target key level (parseClipboardText's targetKeyLevel)
+  // and the current season's dungeon count (computeIoCeiling), instead of
+  // always comparing against the absolute season maximum. Starts at
+  // computeIoCeiling's own static fallback (no key level known yet, before
+  // the first Import) rather than duplicating that 4000 constant here.
+  const [ioCeiling, setIoCeiling] = useState(() => computeIoCeiling(null, null));
 
   // "rioLoaded" now means "the IO slot is populated and ready", regardless
   // of source -- raider.io's on-demand "crawl" for a character it hasn't
@@ -352,14 +373,14 @@ export default function LookupForm() {
       // throws (wrong version, garbage clipboard, etc.), Source should still
       // be able to hand back exactly what was actually read.
       setLastSourceText(rawText);
-      // The addon exports "...:Type:Difficulty:InstanceName:e<version>" now
-      // -- Type/Difficulty distinguish a Mythic+ listing from a raid one
-      // (and, for raid, which difficulty), InstanceName is the current
-      // Keystone dungeon or raid zone name (empty if no active listing).
-      // Rating/ItemLevel/Role/SpecID are Blizzard's own in-game values (see
-      // Core.lua's GetApplicantNames/GetCurrentInstanceInfo), free with the
-      // same call that gets the name.
-      const { contentType, raidDifficultyCode, instanceName, entries } = parseClipboardText(rawText);
+      // The addon exports "...:DungeonName:KeyLevel:e<version>" now --
+      // DungeonName is the current Keystone dungeon (empty if no active
+      // listing), KeyLevel is the addon's best guess at the target key
+      // level for it ("0" if undetected). Rating/ItemLevel/Role/SpecID are
+      // Blizzard's own in-game values (see Core.lua's
+      // GetApplicantNames/GetCurrentDungeonName), free with the same call
+      // that gets the name.
+      const { instanceName, targetKeyLevel, entries } = parseClipboardText(rawText);
       if (entries.length === 0) {
         throw new Error(t.errorNoNames);
       }
@@ -369,20 +390,23 @@ export default function LookupForm() {
       const roleByKey = new Map(entries.map((e) => [e.key, e.addonRole]));
       const specIdByKey = new Map(entries.map((e) => [e.key, e.addonSpecId]));
 
+      // Only worth asking for a dungeon count when there's an actual target
+      // key level to combine it with (computeIoCeiling falls back to the
+      // static ceiling for an undetected level anyway) --
+      // getMythicPlusDungeonCount rides on the same cached WCL query
+      // runLookup makes below regardless, so this never costs a second
+      // request either way, just skips the (pointless) call entirely
+      // otherwise.
+      const dungeonCount =
+        targetKeyLevel != null ? await getMythicPlusDungeonCount(creds.clientId, creds.clientSecret) : null;
+      const ceiling = computeIoCeiling(targetKeyLevel, dungeonCount);
+      setIoCeiling(ceiling);
+
       // Always resolved regardless of dungeonMode -- both season and
       // dungeon values get fetched every time (one WCL query covers both,
       // see lib/wcl.ts), so switching the Season/Dungeon toggle afterwards
       // can update the table instantly instead of needing a re-import.
-      let finalResults = await runLookup(
-        names,
-        creds.clientId,
-        creds.clientSecret,
-        contentType,
-        instanceName,
-        raidDifficultyCode,
-        roleByKey,
-        specIdByKey
-      );
+      let finalResults = await runLookup(names, creds.clientId, creds.clientSecret, instanceName, roleByKey, specIdByKey);
       finalResults = finalResults.map((r) => {
         const blizzardItemLevel = blizzardItemLevelByKey.get(r.key) ?? 0;
         return {
@@ -428,7 +452,8 @@ export default function LookupForm() {
       const rankedResults: RankedResult[] = withRanks(
         withEffectiveMode(finalResults, dungeonMode),
         logsWeight,
-        ioWeight
+        ioWeight,
+        ceiling
       );
       await navigator.clipboard.writeText(toExportString(rankedResults));
 
@@ -533,7 +558,7 @@ export default function LookupForm() {
   // Unranked (tanks/healers, rank 0) always sort to the end, after every
   // real rank -- "erscheinen am Ende der Tabelle ohne Rang".
   const displayRows = results
-    ? withRanks(withEffectiveMode(results, dungeonMode), effectiveLogsWeight, effectiveIoWeight)
+    ? withRanks(withEffectiveMode(results, dungeonMode), effectiveLogsWeight, effectiveIoWeight, ioCeiling)
         .slice()
         .sort((a, b) => {
           if (a.rank === 0 && b.rank === 0) return 0;
@@ -674,33 +699,38 @@ export default function LookupForm() {
       </div>
 
       {filterEnabled && (
-        <div style={{ marginTop: 14, display: "flex", flexDirection: "column", gap: 10, width: "100%" }}>
-          <div style={{ display: "grid", gridTemplateColumns: "40px 1fr 28px", alignItems: "center", gap: 10 }}>
-            <span style={{ fontSize: 12, color: "#aaa", fontWeight: 700, letterSpacing: "0.03em" }}>LOG</span>
-            <input
-              className="qa-slider"
-              type="range"
-              min={0}
-              max={100}
-              step={5}
-              value={logsWeight}
-              onChange={(e) => setLogsWeight(Number(e.target.value))}
-            />
-            <span style={{ fontSize: 12, color: "#ddd", fontWeight: 700, textAlign: "right" }}>{logsWeight}</span>
-          </div>
-          <div style={{ display: "grid", gridTemplateColumns: "40px 1fr 28px", alignItems: "center", gap: 10 }}>
-            <span style={{ fontSize: 12, color: "#aaa", fontWeight: 700, letterSpacing: "0.03em" }}>SCORE</span>
-            <input
-              className="qa-slider"
-              type="range"
-              min={0}
-              max={100}
-              step={5}
-              value={ioWeight}
-              onChange={(e) => setIoWeight(Number(e.target.value))}
-            />
-            <span style={{ fontSize: 12, color: "#ddd", fontWeight: 700, textAlign: "right" }}>{ioWeight}</span>
-          </div>
+        <div
+          style={{
+            marginTop: 14,
+            display: "grid",
+            gridTemplateColumns: "1fr auto 1fr",
+            alignItems: "center",
+            gap: 10,
+            width: "100%",
+          }}
+        >
+          <span style={{ fontSize: 12, color: "#aaa", fontWeight: 700, letterSpacing: "0.03em", textAlign: "left" }}>
+            LOG {logsWeight}
+          </span>
+          <input
+            className="qa-slider"
+            style={{ width: 160 }}
+            type="range"
+            min={0}
+            max={100}
+            step={5}
+            value={scoreBalance}
+            onChange={(e) => setScoreBalance(Number(e.target.value))}
+          />
+          <span style={{ fontSize: 12, color: "#aaa", fontWeight: 700, letterSpacing: "0.03em", textAlign: "right" }}>
+            {/* Number before the label, not after -- this span is
+                right-aligned, so with the number trailing, "SCORE" itself
+                (fixed width) would shift left/right as the number's digit
+                count changes (5 vs 45 vs 100). Leading with the number
+                keeps "SCORE" anchored to the right edge, only the number
+                moves. */}
+            {ioWeight} SCORE
+          </span>
         </div>
       )}
 

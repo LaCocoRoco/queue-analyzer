@@ -41,11 +41,13 @@ StaticPopupDialogs["QUEUEANALYZER_WRONG_VERSION"] = {
 	hideOnEscape = true,
 }
 
----Returns info about your own current Group Finder listing (used by the
----webapp to decide whether to query WarcraftLogs' Mythic+ season data or a
----specific raid zone/difficulty, instead of whole-season-only data), or nil
----if you have no active listing or it's neither a Mythic+ Keystone nor a
----raid activity (e.g. PvP, Quests -- WCL Log data doesn't apply).
+---Returns the display name of the Mythic Keystone dungeon for your own
+---current Group Finder listing (used by the webapp's Season/Dungeon toggle
+---to look up dungeon-specific WarcraftLogs data instead of whole-season
+---data), or nil if you have no active listing or it isn't a Keystone
+---activity. Strips the trailing "(Mythic Keystone)"-style parenthetical
+---Blizzard appends to the activity name, to match WarcraftLogs' own plain
+---dungeon names as closely as possible.
 ---
 ---C_LFGList.GetActiveEntryInfo() returns `activityIDs` (plural, an array --
 ---confirmed against current API docs; the field used to be singular
@@ -54,22 +56,8 @@ StaticPopupDialogs["QUEUEANALYZER_WRONG_VERSION"] = {
 ---info, no "Table" suffix) is also deprecated and returns positional
 ---values, not a table -- GetActivityInfoTable() is the current table-based
 ---replacement and is what actually has a `.fullName` field.
----
----Difficulty is read TWO ways and either one firing is enough:
----activityInfo's own isNormalActivity/isHeroicActivity/isMythicActivity
----booleans, AND the "(Normal)"/"(Heroic)"/"(Mythic)" parenthetical suffix
----Blizzard appends to fullName. The booleans looked like the more "correct"
----API-driven signal on paper, but confirmed LIVE (a real self-posted
----Normal-difficulty raid listing) that they don't reliably fire for every
----raid listing -- the parenthetical text, which is always shown correctly
----on-screen to the player either way, doesn't have that problem. Checking
----both is strictly safer than either alone. isMythicPlusActivity is kept as
----the sole Mythic+ signal (well-established, no evidence it's unreliable).
----LFR is deliberately not handled -- Raid Finder groups aren't organized
----through the Premade Groups applicant system this addon reads from in the
----first place.
----@return {type: "M"|"R", difficulty: string, name: string}|nil
-local function GetCurrentInstanceInfo()
+---@return string|nil
+local function GetCurrentDungeonName()
 	local entry = C_LFGList.GetActiveEntryInfo()
 	if not entry or not entry.activityIDs or not entry.activityIDs[1] then
 		return nil
@@ -78,28 +66,38 @@ local function GetCurrentInstanceInfo()
 	if not activityInfo or not activityInfo.fullName then
 		return nil
 	end
-	local suffix = (activityInfo.fullName:match("%((.-)%)%s*$") or ""):lower()
 	local name = activityInfo.fullName:gsub("%s*%b()%s*$", "")
-	if name == "" then
+	return name ~= "" and name or nil
+end
+
+---Returns the target Mythic+ key level for the CURRENT listing, derived
+---from the leader's own currently-held keystone -- NOT from the listing's
+---title/comment text. That text-based approach was tried and abandoned:
+---confirmed live, over several rounds of byte-level inspection, that
+---C_LFGList.GetActiveEntryInfo() never actually returns the leader's typed
+---text at all -- both .name and .comment come back as a "|Ku<N>|k" Blizzard
+---text-escape whose embedded number is just an internal, meaninglessly
+---incrementing reference ID (it counted 26, 27, 28, 29 across successive
+---clicks with zero relation to any real key level, and the exact same
+---escape rendered as "3" once and "Unknown" another time in chat -- and
+---once even crashed the Export EditBox's SetText entirely when embedded
+---raw, since WoW's widget text parsing chokes on the malformed sequence).
+---There is no usable free-text field on this API at all.
+---
+---Deliberately NOT cross-checked against the currently posted dungeon's
+---mapID -- explicitly requested: in practice, a player who's actively
+---running Mythic+ always has SOME keystone in their bags, and even when
+---it's for a different dungeon than the one being posted, its LEVEL still
+---tracks their general keystone range closely enough to be useful (nobody
+---running a +20 posts a +10 group). Simpler and covers more cases than
+---requiring an exact dungeon match.
+---@return number|nil
+local function GetTargetKeystoneLevel()
+	if not C_MythicPlus or not C_MythicPlus.GetOwnedKeystoneLevel then
 		return nil
 	end
-
-	if activityInfo.isMythicPlusActivity then
-		return { type = "M", difficulty = "-", name = name }
-	end
-
-	local difficulty
-	if suffix:find("heroic", 1, true) or activityInfo.isHeroicActivity then
-		difficulty = "H"
-	elseif suffix:find("mythic", 1, true) or activityInfo.isMythicActivity then
-		difficulty = "M"
-	elseif suffix:find("normal", 1, true) or activityInfo.isNormalActivity then
-		difficulty = "N"
-	end
-	if not difficulty then
-		return nil
-	end
-	return { type = "R", difficulty = difficulty, name = name }
+	local level = C_MythicPlus.GetOwnedKeystoneLevel()
+	return level and level >= 2 and level or nil
 end
 
 ---Collect Name, Server, Blizzard's own item level, Mythic+ rating, assigned
@@ -468,30 +466,28 @@ function QueueAnalyzer_RefreshExport()
 	end
 
 	local entries = GetApplicantNames()
-	local instanceInfo = GetCurrentInstanceInfo()
-	local instanceType = instanceInfo and instanceInfo.type or "M"
-	local instanceDifficulty = instanceInfo and instanceInfo.difficulty or "-"
-	local instanceName = instanceInfo and instanceInfo.name or ""
+	local dungeonName = GetCurrentDungeonName() or ""
+	local keyLevel = GetTargetKeystoneLevel()
 
 	-- One flat ":"-delimited string
-	-- ("Name:Server:Role:ItemLevel:Rating:SpecID:Name:Server:Role:ItemLevel:Rating:SpecID:...:Type:Difficulty:InstanceName:e<version>")
+	-- ("Name:Server:Role:ItemLevel:Rating:SpecID:Name:Server:Role:ItemLevel:Rating:SpecID:...:DungeonName:KeyLevel:e<version>")
 	-- instead of separate lines -- easier to select/copy reliably as a
 	-- single line, and the webapp reads it back the same way (splits on
-	-- ":"; names/realms/zone names never contain ":"). Type/Difficulty/
-	-- InstanceName are always the LAST three fields before the marker when
-	-- there's anything at all to export, even if empty/"-" (no active
-	-- listing, or a Mythic+ listing where Difficulty doesn't apply) -- a
-	-- single value for the whole listing, not per applicant, so each only
-	-- needs to appear once; the webapp needs a fixed position to read them
-	-- from (see lib/lookup.ts's parseClipboardText, which reads the LAST
-	-- three tokens before the marker rather than assuming every group of 6
-	-- is a member). Type defaults to "M" (not "R") when there's no active
-	-- listing at all -- matches the pre-existing "empty dungeon name falls
-	-- back to season-only data" behavior, just for Mythic+ specifically
-	-- rather than an undefined state. Truly empty (no listing AND no
-	-- applicants) stays a genuinely empty string, not a stray marker --
-	-- that showed up in the Export field on every addon startup before any
-	-- listing existed.
+	-- ":"; names/realms/dungeon names never contain ":"). DungeonName/
+	-- KeyLevel are always the LAST two fields before the marker when
+	-- there's anything at all to export, even if empty/"0" (no active
+	-- Keystone listing, or no readable key level at all) -- single values
+	-- for the whole listing, not per applicant, so each only needs to
+	-- appear once; the webapp's Season/Dungeon toggle and Score-ceiling
+	-- calculation need a fixed position to read them from (see
+	-- lib/lookup.ts's parseClipboardText, which reads the LAST two tokens
+	-- before the marker rather than assuming every group of 6 is a
+	-- member). KeyLevel is "0" (never omitted/empty), not a real level --
+	-- see GetTargetKeystoneLevel's own comment -- the webapp treats 0 the
+	-- same as "unknown" and falls back to its own static default ceiling.
+	-- Truly empty (no dungeon AND no applicants) stays a genuinely empty
+	-- string, not a stray marker -- that showed up in the Export field on
+	-- every addon startup before any listing existed.
 	--
 	-- The trailing "e<version>" token (ADDON_VERSION -- see its own comment)
 	-- is a self-identifying, self-versioning marker: this string's own
@@ -504,11 +500,10 @@ function QueueAnalyzer_RefreshExport()
 	-- match this addon's own -- the webapp encodes which addon version it
 	-- was built against the same way.
 	local text = ""
-	if instanceName ~= "" or #entries > 0 then
+	if dungeonName ~= "" or #entries > 0 then
 		text = table.concat(entries, ":")
-			.. ":" .. instanceType
-			.. ":" .. instanceDifficulty
-			.. ":" .. instanceName
+			.. ":" .. dungeonName
+			.. ":" .. tostring(keyLevel or 0)
 			.. ":e" .. ADDON_VERSION
 	end
 
@@ -696,19 +691,11 @@ end
 --   2. After the last role icon: the RaiderIO spec Tier grade
 --      (TierColorCode), for every applicant with a known spec grade,
 --      regardless of rank.
---   3. Log (PercentileColorCode) -- anchored to member.Rating for Mythic+
---      listings, which have a real Rating column there. Raid listings don't
---      show a Rating column at all (confirmed live: member.Rating ends up
---      positioned where the Invite button is instead, so anchoring there
---      made our own readout render on top of it), so for raid this instead
---      anchors after the Decline button -- confirmed live there's unused
---      row space there specifically on raid listings (Mythic+'s Rating
---      column has nothing to fill that space with on raid rows). Falls
---      back to folding it into readout #2 if Decline isn't found for some
---      reason. Tanks/healers still get a Log value here now (see
---      lib/lookup.ts) -- they just never have a rank (data.rank stays 0),
---      so they never get a Name-prefix star, but they still get a Tier
---      grade and Log readout.
+--   3. Log (PercentileColorCode) -- anchored to member.Rating, which is
+--      where Mythic+ listings show their real Rating column. Tanks/healers
+--      still get a Log value here now (see lib/lookup.ts) -- they just
+--      never have a rank (data.rank stays 0), so they never get a
+--      Name-prefix star, but they still get a Tier grade and Log readout.
 local hookedApplicantReadouts = false
 local function HookApplicantReadouts()
 	if hookedApplicantReadouts or not LFGListApplicationViewer_UpdateApplicantMember then
@@ -757,39 +744,13 @@ local function HookApplicantReadouts()
 
 		-- Re-anchored every update (not just on creation) since which role
 		-- icon is the rightmost visible one can change between applicants.
-		local logText = PercentileColorCode(data.best) .. string.format("%02d", data.best) .. "|r"
-		local instanceInfo = GetCurrentInstanceInfo()
-		local isRaid = instanceInfo and instanceInfo.type == "R"
-
 		member.QueueAnalyzerTierReadout:ClearAllPoints()
 		member.QueueAnalyzerTierReadout:SetPoint("LEFT", GetLastRoleIcon(member), "RIGHT", 2, 0)
 		member.QueueAnalyzerTierReadout:SetText(TierColorCode(data.tier))
 
-		if isRaid then
-			-- Invite/Decline are per-APPLICANT, not per-member (confirmed
-			-- against Blizzard's own LFGList.lua -- UpdateApplicant, not
-			-- UpdateApplicantMember, is what shows/hides them), so they live
-			-- on member's parent, not member itself. There's unused row
-			-- space to the right of Decline on raid listings specifically
-			-- (raid rows have no Rating column at all to fill it, unlike
-			-- Mythic+) -- confirmed live via screenshot. Falls back to
-			-- folding Log into the Tier readout instead of just dropping it
-			-- if DeclineButton isn't found for some reason (e.g. a future
-			-- Blizzard UI change).
-			local declineButton = member.DeclineButton or (member:GetParent() and member:GetParent().DeclineButton)
-			if declineButton then
-				member.QueueAnalyzerRatingReadout:ClearAllPoints()
-				member.QueueAnalyzerRatingReadout:SetPoint("LEFT", declineButton, "RIGHT", 4, 0)
-				member.QueueAnalyzerRatingReadout:SetText(logText)
-			else
-				member.QueueAnalyzerTierReadout:SetText(TierColorCode(data.tier) .. " " .. logText)
-				member.QueueAnalyzerRatingReadout:SetText("")
-			end
-		else
-			member.QueueAnalyzerRatingReadout:ClearAllPoints()
-			member.QueueAnalyzerRatingReadout:SetPoint("LEFT", member.Rating, "RIGHT", 2, 0)
-			member.QueueAnalyzerRatingReadout:SetText(logText)
-		end
+		member.QueueAnalyzerRatingReadout:ClearAllPoints()
+		member.QueueAnalyzerRatingReadout:SetPoint("LEFT", member.Rating, "RIGHT", 2, 0)
+		member.QueueAnalyzerRatingReadout:SetText(PercentileColorCode(data.best) .. string.format("%02d", data.best) .. "|r")
 	end)
 end
 
