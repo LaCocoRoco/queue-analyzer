@@ -135,12 +135,22 @@ function RoleIcon({ role, color, size = 15 }: { role: "tank" | "healer"; color: 
 // such API-provided color, so this reuses our own Logs-style percentile
 // tiers, min-max normalized across the current batch, same technique
 // rankResults already uses internally for weighting.
+// Never touches a character with ioFromRaiderIo: true -- results now
+// persist across imports (see importContext's comment below), so without
+// this, a character with real raider.io data from an earlier import would
+// get silently downgraded back to this cruder approximation just because
+// the RaiderIO toggle happens to be off for a LATER import. min/max are
+// still computed across the whole batch (including those characters) for a
+// consistent normalization, just not written back to them.
 function applyBlizzardScoreAsIo(results: LookupResult[]): LookupResult[] {
   const withScore = results.filter((r) => r.blizzardScore > 0);
   const min = withScore.length ? Math.min(...withScore.map((r) => r.blizzardScore)) : 0;
   const max = withScore.length ? Math.max(...withScore.map((r) => r.blizzardScore)) : 0;
 
   return results.map((r) => {
+    if (r.ioFromRaiderIo) {
+      return r;
+    }
     if (r.blizzardScore <= 0) {
       return { ...r, ioScore: 0, ioColor: "#9D9D9D" };
     }
@@ -206,10 +216,28 @@ export default function LookupForm() {
   // button label instead of the generic one.
   const [versionMismatch, setVersionMismatch] = useState(false);
 
-  // Raw (unsorted) results from the last successful lookup -- kept around
-  // purely so the Filter/Preview table below can re-rank live as the
-  // weight sliders move, without re-querying WCL on every drag.
+  // Raw (unsorted) results from every import THIS recruiting context (see
+  // importContext below) -- kept around purely so the Filter/Preview table
+  // below can re-rank live as the weight sliders move, without re-querying
+  // WCL on every drag. ACCUMULATES across imports now (upserted by key in
+  // handleReadFromClipboard) rather than being replaced outright on every
+  // Import click -- explicitly requested: applicants shouldn't vanish from
+  // the table just because they're no longer in the current WoW applicant
+  // list (they may have left the queue, or you scrolled past them), so you
+  // can cross-reference post-run logs against everyone you looked at this
+  // session, not just whoever happened to be on screen for the LAST import.
   const [results, setResults] = useState<LookupResult[] | null>(null);
+  // The dungeon + target key level of the last import -- a fresh Import
+  // only merges into the existing `results` table when both match; a
+  // change means a genuinely different recruiting context (a new dungeon,
+  // or the same dungeon but now recruiting for a different key level), so
+  // that starts the table over instead of mixing unrelated applicant pools
+  // together. Also what lets handleReadFromClipboard tell which of THIS
+  // import's entries are already known (skip their WCL/raider.io lookups
+  // entirely) vs. genuinely new.
+  const [importContext, setImportContext] = useState<{ instanceName: string | null; targetKeyLevel: number | null } | null>(
+    null
+  );
   const [filterEnabled, setFilterEnabled] = useState(false);
   const [previewEnabled, setPreviewEnabled] = useState(false);
   // Off by default: Blizzard's own in-game rating (sent by the addon with
@@ -384,11 +412,37 @@ export default function LookupForm() {
       if (entries.length === 0) {
         throw new Error(t.errorNoNames);
       }
-      const names = entries.map((e) => e.key);
+
+      // Same dungeon AND same target key level as the last import -> merge
+      // into the existing table; anything else (including the very first
+      // import) starts fresh -- see importContext's own comment for why.
+      const sameContext =
+        importContext != null &&
+        importContext.instanceName === instanceName &&
+        importContext.targetKeyLevel === targetKeyLevel;
+      const priorResults = sameContext ? (results ?? []) : [];
+      setImportContext({ instanceName, targetKeyLevel });
+
       const blizzardScoreByKey = new Map(entries.map((e) => [e.key, e.blizzardScore]));
       const blizzardItemLevelByKey = new Map(entries.map((e) => [e.key, e.blizzardItemLevel]));
       const roleByKey = new Map(entries.map((e) => [e.key, e.addonRole]));
       const specIdByKey = new Map(entries.map((e) => [e.key, e.addonSpecId]));
+
+      // Only characters not already known from an earlier import IN THIS
+      // SAME CONTEXT need an actual WCL query -- re-querying everyone on
+      // every single Import (most of whom are usually the same applicants
+      // as last time) was pure API-budget waste. A role change is the one
+      // thing that invalidates a cached entry outright -- the WCL metric
+      // (points_and_damage vs. points_and_healing) depends on it, and
+      // nothing else about a character's logs meaningfully changes
+      // minute-to-minute during one recruiting session.
+      const priorByKey = new Map(priorResults.map((r) => [r.key, r]));
+      const namesNeedingLookup = entries
+        .filter((e) => {
+          const prior = priorByKey.get(e.key);
+          return !prior || prior.role !== (e.addonRole ?? prior.role);
+        })
+        .map((e) => e.key);
 
       // Only worth asking for a dungeon count when there's an actual target
       // key level to combine it with (computeIoCeiling falls back to the
@@ -406,17 +460,32 @@ export default function LookupForm() {
       // dungeon values get fetched every time (one WCL query covers both,
       // see lib/wcl.ts), so switching the Season/Dungeon toggle afterwards
       // can update the table instantly instead of needing a re-import.
-      let finalResults = await runLookup(names, creds.clientId, creds.clientSecret, instanceName, roleByKey, specIdByKey);
+      const freshResults =
+        namesNeedingLookup.length > 0
+          ? await runLookup(namesNeedingLookup, creds.clientId, creds.clientSecret, instanceName, roleByKey, specIdByKey)
+          : [];
+      const freshByKey = new Map(freshResults.map((r) => [r.key, r]));
+
+      // This import's full result set: freshly looked-up characters plus
+      // reused data (WCL, and below, raider.io) for everyone else already
+      // known from an earlier import this context. `!` is safe here --
+      // namesNeedingLookup only excludes a key when priorByKey already has
+      // it.
+      let finalResults: LookupResult[] = entries.map((e) => freshByKey.get(e.key) ?? priorByKey.get(e.key)!);
       finalResults = finalResults.map((r) => {
         const blizzardItemLevel = blizzardItemLevelByKey.get(r.key) ?? 0;
         return {
           ...r,
+          // Blizzard's own live fields are free (sent with every export, no
+          // network cost) -- refreshed here for EVERY entry, known or new.
           blizzardScore: blizzardScoreByKey.get(r.key) ?? 0,
           blizzardItemLevel,
-          // Default the visible iLvl slot to Blizzard's own value right
-          // away -- fetchRioScores (below, only when raider.io is actually
-          // used) overwrites it with raider.io's own itemLevel later.
-          itemLevel: blizzardItemLevel,
+          // Only defaults the visible iLvl slot to Blizzard's value for
+          // entries that don't already have a better one from raider.io --
+          // fetchRioScores below skips already-resolved characters, so
+          // their existing (more accurate) itemLevel would otherwise get
+          // clobbered by this on every later import.
+          itemLevel: r.ioFromRaiderIo ? r.itemLevel : blizzardItemLevel,
         };
       });
 
@@ -424,7 +493,10 @@ export default function LookupForm() {
       // so the IO slot always needs resolving here -- same as before, just
       // no longer gated on filterEnabled. Lazy-loading raider.io (see the
       // effect above) is now only for turning the RaiderIO toggle on/off
-      // AFTER an already-finished lookup, not for Filter.
+      // AFTER an already-finished lookup, not for Filter. Both
+      // fetchRioScores and applyBlizzardScoreAsIo skip characters already
+      // resolved via a real raider.io profile (ioFromRaiderIo), so this is
+      // cheap even for a mostly-already-known batch.
       if (raiderIoEnabled) {
         setRioLoading(true);
         finalResults = await fetchRioScores(finalResults, REGION);
@@ -433,8 +505,23 @@ export default function LookupForm() {
         finalResults = applyBlizzardScoreAsIo(finalResults);
       }
       setRioLoaded(true);
-      setResults(finalResults);
 
+      // Merged into the accumulated table (upsert by key), not replaced
+      // outright -- see importContext's comment for why applicants from
+      // earlier imports this context should stick around instead of
+      // vanishing.
+      const mergedByKey = new Map(priorResults.map((r) => [r.key, r]));
+      for (const r of finalResults) {
+        mergedByKey.set(r.key, r);
+      }
+      setResults(Array.from(mergedByKey.values()));
+
+      // Ranked from finalResults (THIS import's entries only), not the
+      // accumulated `results` state set just above -- exporting/ranking
+      // people who've already left the queue alongside current applicants
+      // would give nonsense rank numbers in-game; the accumulated table is
+      // for your own later review, not for what gets written back to WoW.
+      //
       // Always exported in the original applicant-list order, filter or
       // not: WoW's Group Finder applicant list has no API to reorder
       // (confirmed against Blizzard's own LFGList.lua -- displayOrderID is

@@ -102,6 +102,17 @@ export interface LookupResult {
   // raider.io's own color for ioScore (see lib/rio.ts) -- their gradient,
   // not something we compute ourselves.
   ioColor: string;
+  // True once ioScore/ioColor/itemLevel actually came from a real raider.io
+  // profile (see fetchRioScores), as opposed to the Blizzard-derived
+  // approximation (applyBlizzardScoreAsIo in LookupForm.tsx) or nothing at
+  // all yet. LookupForm.tsx keeps results across imports now instead of
+  // replacing them outright (see its importContext comment) -- this is what
+  // lets fetchRioScores/applyBlizzardScoreAsIo skip a character already
+  // resolved this way on a LATER import, instead of re-spending a raider.io
+  // request on someone already known, or downgrading their real data back
+  // to the cruder Blizzard approximation just because the RaiderIO toggle
+  // happens to be off for that particular import.
+  ioFromRaiderIo: boolean;
   itemLevel: number;
   // Blizzard's own in-game Mythic+ rating (C_LFGList's dungeonScore), sent
   // by the addon alongside each Name-Realm in the export -- see
@@ -304,6 +315,7 @@ async function lookupOne(
       dungeonRuns: 0,
       ioScore: 0,
       ioColor: NO_IO_COLOR,
+      ioFromRaiderIo: false,
       blizzardScore: 0,
       blizzardItemLevel: 0,
       itemLevel: 0,
@@ -346,6 +358,7 @@ async function lookupOne(
       dungeonRuns: er?.totalKills ?? 0,
       ioScore: 0,
       ioColor: NO_IO_COLOR,
+      ioFromRaiderIo: false,
       blizzardScore: 0,
       blizzardItemLevel: 0,
       itemLevel: 0,
@@ -370,6 +383,7 @@ async function lookupOne(
     dungeonRuns: 0,
     ioScore: 0,
     ioColor: NO_IO_COLOR,
+      ioFromRaiderIo: false,
     blizzardScore: 0,
     blizzardItemLevel: 0,
     itemLevel: 0,
@@ -398,19 +412,31 @@ export function withEffectiveMode(results: LookupResult[], dungeonMode: "season"
 // Fetches raider.io data for an existing result set and returns a new array
 // with ioScore/ioColor/itemLevel filled in -- called separately (and
 // lazily, only when needed) rather than as part of lookupOne/runLookup, see
-// LookupResult's ioScore field comment for why.
+// LookupResult's ioScore field comment for why. Skips characters that
+// already have ioFromRaiderIo: true (see its own comment) -- results now
+// persist across imports (LookupForm.tsx's importContext), so without this
+// a character already resolved in an earlier import would get a wasted
+// re-request every single time the table is re-touched (a later Import, or
+// just toggling the RaiderIO switch off and back on).
 export async function fetchRioScores(results: LookupResult[], region: string): Promise<LookupResult[]> {
   return mapWithConcurrency(results, CONCURRENCY, async (r) => {
+    if (r.ioFromRaiderIo) {
+      return r;
+    }
     const rio = await getRioProfile(r.name, toServerSlug(r.realm), region);
     // Falls back to Blizzard's own item level (already sitting in
     // r.itemLevel from the addon export) rather than 0 when raider.io has
     // no profile for this character -- a missing raider.io lookup shouldn't
-    // blank out a value we already have.
+    // blank out a value we already have. ioFromRaiderIo only flips to true
+    // on an actual hit -- a miss (raider.io hasn't crawled this character
+    // yet) stays retryable on a later import instead of being permanently
+    // given up on.
     return {
       ...r,
       ioScore: rio?.score ?? 0,
       ioColor: rio?.color ?? NO_IO_COLOR,
       itemLevel: rio?.itemLevel ?? r.itemLevel,
+      ioFromRaiderIo: rio != null,
     };
   });
 }

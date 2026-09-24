@@ -404,6 +404,24 @@ local function CreateQueueAnalyzerFrame()
 	-- Clicking back in re-selects everything -- you should never need to
 	-- manually drag-select in a field that only ever holds one full value.
 	exportBox:SetScript("OnEditFocusGained", function(self) self:HighlightText() end)
+	-- Clears itself right after Ctrl+C -- an empty box is then an
+	-- unambiguous "you copied whatever was last here already" signal, so a
+	-- stale Refresh (data you never actually copied to the webapp) can't be
+	-- mistaken for fresh, already-exported data. Deferred one frame (rather
+	-- than clearing inline in OnKeyDown) so this runs AFTER the client's own
+	-- native Ctrl+C handling has already copied the current text to the OS
+	-- clipboard -- clearing synchronously here risked wiping the text out
+	-- from under that native copy, before it had actually read it.
+	-- Ctrl+X deliberately isn't handled the same way -- WoW's EditBox has no
+	-- built-in "cut" support, so it wouldn't actually put anything on the
+	-- clipboard; clearing the box on it would just lose the data instead.
+	exportBox:SetScript("OnKeyDown", function(self, key)
+		if key == "C" and IsControlKeyDown() then
+			C_Timer.After(0, function()
+				self:SetText("")
+			end)
+		end
+	end)
 	f.exportBox = exportBox
 
 	local refreshButton = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
@@ -449,6 +467,11 @@ local function CreateQueueAnalyzerFrame()
 		QueueAnalyzerImportedData = data
 		RefreshApplicantListDisplay()
 		f.status:SetText(count .. " entries imported.")
+		-- Cleared only on SUCCESS, not on an error return above -- an empty
+		-- Import box is the "this has been applied already" signal; on an
+		-- error the pasted text should stay put so you can see/fix it
+		-- instead of having to re-copy it from the webapp.
+		f.importBox:SetText("")
 	end)
 
 	f.status = f:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
