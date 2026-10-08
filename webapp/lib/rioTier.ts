@@ -95,7 +95,10 @@ async function resolveCurrentSeason(): Promise<string> {
 
 function getCurrentSeasonSlug(): Promise<string> {
   if (!cachedSeasonPromise) {
-    cachedSeasonPromise = resolveCurrentSeason().catch(() => FALLBACK_SEASON);
+    cachedSeasonPromise = resolveCurrentSeason().catch((err) => {
+      console.error("QueueAnalyzer: raider.io current-season detection failed, falling back to a hardcoded slug:", err);
+      return FALLBACK_SEASON;
+    });
   }
   return cachedSeasonPromise;
 }
@@ -164,7 +167,10 @@ async function fetchSpecTiers(region: string): Promise<Map<number, TierGrade>> {
 // getRioProfile in lib/rio.ts.
 export function getSpecTiers(region: string): Promise<Map<number, TierGrade>> {
   if (!cachedTierPromise) {
-    cachedTierPromise = fetchSpecTiers(region).catch(() => new Map<number, TierGrade>());
+    cachedTierPromise = fetchSpecTiers(region).catch((err) => {
+      console.error("QueueAnalyzer: raider.io Tier-grade fetch failed, no Tier grades will be shown:", err);
+      return new Map<number, TierGrade>();
+    });
   }
   return cachedTierPromise;
 }

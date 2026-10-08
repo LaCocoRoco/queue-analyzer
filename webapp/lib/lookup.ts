@@ -298,6 +298,7 @@ async function lookupOne(
   try {
     profile = await getCharacterProfile(name, slug, REGION, zoneID, partition, clientId, clientSecret, encounterID, addonRole);
   } catch (err) {
+    console.error(`QueueAnalyzer: WCL lookup failed for ${key}:`, err);
     return {
       key,
       name,

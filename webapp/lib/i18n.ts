@@ -33,6 +33,21 @@ export interface Dict {
   configIncomplete: string;
   wrongAddonVersion: string;
   apiKeyInvalid: string;
+  // Short (1-3 word) categories appended to buttonErrorRetry as "Error: X"
+  // on the button itself (see errorShortLabel in LookupForm.tsx) --
+  // explicitly requested as a quicker-to-scan signal than the bare generic
+  // "Error" word, without a full inline message. WRONG_ADDON_VERSION
+  // already has its own dedicated, more actionable label
+  // (buttonWrongVersion, "Update Add-on!") so it isn't duplicated here.
+  errorShortNoRealm: string;
+  errorShortConfig: string;
+  errorShortWindowFocus: string;
+  // The clipboard didn't contain the addon's Export string at all (empty,
+  // the Import result pasted back by mistake, random other text, etc.) --
+  // parseClipboardText's own thrown message is a hardcoded English literal
+  // (lib/lookup.ts doesn't have access to the locale dict), matched
+  // directly in LookupForm.tsx rather than translated at the source.
+  errorShortWrongImport: string;
 }
 
 const en: Dict = {
@@ -57,6 +72,10 @@ const en: Dict = {
   configIncomplete: "Configuration incomplete: WCL zone ID/partition not set.",
   wrongAddonVersion: "This webapp expects a different addon version. Please update the addon.",
   apiKeyInvalid: "Your API key has expired or is invalid. Please re-enter it.",
+  errorShortNoRealm: "No Realm",
+  errorShortConfig: "Wrong Config",
+  errorShortWindowFocus: "Window Focus",
+  errorShortWrongImport: "Wrong Import",
 };
 
 const de: Dict = {
@@ -81,6 +100,10 @@ const de: Dict = {
   configIncomplete: "Konfiguration unvollständig: WCL Zone-ID/Partition nicht gesetzt.",
   wrongAddonVersion: "Diese Webapp erwartet eine andere Addon-Version. Bitte Addon aktualisieren.",
   apiKeyInvalid: "Dein API-Schlüssel ist abgelaufen oder ungültig. Bitte neu eingeben.",
+  errorShortNoRealm: "Kein Realm",
+  errorShortConfig: "Falsche Config",
+  errorShortWindowFocus: "Fensterfokus",
+  errorShortWrongImport: "Falscher Import",
 };
 
 const fr: Dict = {
@@ -105,6 +128,10 @@ const fr: Dict = {
   configIncomplete: "Configuration incomplète : Zone ID/Partition WCL non définies.",
   wrongAddonVersion: "Cette application attend une version différente de l'addon. Merci de mettre à jour l'addon.",
   apiKeyInvalid: "Ta clé API a expiré ou est invalide. Merci de la ressaisir.",
+  errorShortNoRealm: "Pas de royaume",
+  errorShortConfig: "Config invalide",
+  errorShortWindowFocus: "Fenêtre inactive",
+  errorShortWrongImport: "Import incorrect",
 };
 
 const es: Dict = {
@@ -129,6 +156,10 @@ const es: Dict = {
   configIncomplete: "Configuración incompleta: Zone ID/Partition de WCL no definidos.",
   wrongAddonVersion: "Esta aplicación espera una versión diferente del addon. Actualiza el addon.",
   apiKeyInvalid: "Tu clave API ha caducado o no es válida. Vuelve a introducirla.",
+  errorShortNoRealm: "Sin reino",
+  errorShortConfig: "Config incorrecta",
+  errorShortWindowFocus: "Ventana sin foco",
+  errorShortWrongImport: "Import incorrecto",
 };
 
 const it: Dict = {
@@ -153,6 +184,10 @@ const it: Dict = {
   configIncomplete: "Configurazione incompleta: Zone ID/Partition WCL non impostati.",
   wrongAddonVersion: "Questa app si aspetta una versione diversa dell'addon. Aggiorna l'addon.",
   apiKeyInvalid: "La tua chiave API è scaduta o non valida. Reinseriscila.",
+  errorShortNoRealm: "Nessun reame",
+  errorShortConfig: "Config errata",
+  errorShortWindowFocus: "Finestra inattiva",
+  errorShortWrongImport: "Import errato",
 };
 
 const ru: Dict = {
@@ -177,6 +212,10 @@ const ru: Dict = {
   configIncomplete: "Неполная конфигурация: Zone ID/Partition WCL не заданы.",
   wrongAddonVersion: "Это веб-приложение ожидает другую версию аддона. Пожалуйста, обновите аддон.",
   apiKeyInvalid: "Срок действия API-ключа истёк или он недействителен. Введите его заново.",
+  errorShortNoRealm: "Нет сервера",
+  errorShortConfig: "Неверный конфиг",
+  errorShortWindowFocus: "Окно не в фокусе",
+  errorShortWrongImport: "Неверный импорт",
 };
 
 export const DICTS: Record<Locale, Dict> = { en, de, fr, es, it, ru };

@@ -231,7 +231,10 @@ function getZones(clientId: string, clientSecret: string): Promise<RawZone[]> {
   if (!cachedZonesPromise) {
     cachedZonesPromise = wclGraphQL<RawSeasonData>(CURRENT_SEASON_QUERY, {}, clientId, clientSecret)
       .then((data) => data.worldData.zones)
-      .catch(() => []);
+      .catch((err) => {
+        console.error("QueueAnalyzer: WCL zone/season detection failed, falling back to defaults:", err);
+        return [];
+      });
   }
   return cachedZonesPromise;
 }

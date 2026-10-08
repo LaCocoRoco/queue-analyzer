@@ -215,6 +215,16 @@ export default function LookupForm() {
   // actually actionable ("update the addon"), so it gets its own specific
   // button label instead of the generic one.
   const [versionMismatch, setVersionMismatch] = useState(false);
+  // A short (few-word) category for the button's own "Error" label itself
+  // (e.g. "Error: No Realm") -- explicitly requested as a quicker signal
+  // than the generic "Error" word alone, without going as far as a full
+  // inline error message (see errorMessage's own comment on why that's
+  // avoided -- layout shift). null falls back to the plain generic label.
+  // Deliberately only covers the handful of categories a user can actually
+  // act on (classified in handleReadFromClipboard's catch block) -- an
+  // unclassified/unexpected error still just shows "Error", with the real
+  // detail in errorMessage/the console instead.
+  const [errorShortLabel, setErrorShortLabel] = useState<string | null>(null);
 
   // Raw (unsorted) results from every import THIS recruiting context (see
   // importContext below) -- kept around purely so the Filter/Preview table
@@ -294,7 +304,10 @@ export default function LookupForm() {
     setLocale(detectLocale());
     loadCredentials()
       .then(setCreds)
-      .catch(() => setCreds(null))
+      .catch((err) => {
+        console.error("QueueAnalyzer: loading saved WCL credentials failed:", err);
+        setCreds(null);
+      })
       .finally(() => setCredsLoading(false));
   }, []);
 
@@ -324,6 +337,15 @@ export default function LookupForm() {
         setResults(updated);
         setRioLoaded(true);
       })
+      .catch((err) => {
+        // fetchRioScores/getRioProfile are designed to never throw (a
+        // raider.io outage degrades to per-character nulls instead), so
+        // this is a last-resort safety net -- without it, an unexpected
+        // failure here would leave rioLoaded stuck at false, so this
+        // effect would just retry (and fail) forever on every re-render.
+        console.error("QueueAnalyzer: raider.io score fetch failed unexpectedly:", err);
+        setRioLoaded(true);
+      })
       .finally(() => setRioLoading(false));
   }, [raiderIoEnabled, results, rioLoaded, rioLoading]);
 
@@ -344,6 +366,7 @@ export default function LookupForm() {
       await saveCredentials(newCreds);
       setCreds(newCreds);
     } catch (err) {
+      console.error("QueueAnalyzer: saving WCL credentials failed:", err);
       setValidationError((err as Error).message);
     } finally {
       setValidating(false);
@@ -371,6 +394,7 @@ export default function LookupForm() {
     if (!creds || buttonState === "loading") return;
     setErrorMessage(null);
     setVersionMismatch(false);
+    setErrorShortLabel(null);
 
     if (!navigator.clipboard?.readText || !navigator.clipboard?.writeText) {
       setErrorMessage(t.errorClipboardUnavailable);
@@ -388,7 +412,8 @@ export default function LookupForm() {
     // click costs nothing.
     try {
       await validateCredentials(creds.clientId, creds.clientSecret);
-    } catch {
+    } catch (err) {
+      console.error("QueueAnalyzer: WCL credential re-validation failed, logging out:", err);
       await clearCredentials();
       setCreds(null);
       setLoggedOutReason(t.apiKeyInvalid);
@@ -547,16 +572,55 @@ export default function LookupForm() {
       setButtonState("done");
       setTimeout(() => setButtonState("idle"), 1800);
     } catch (err) {
+      // Logged in full (not just the short label/message below) so an
+      // intermittent Import failure can actually be diagnosed from the
+      // browser console instead of just showing a terse error label.
+      console.error("QueueAnalyzer: Import from Clipboard failed:", err);
+
       const isWrongVersion = err instanceof LookupError && err.code === "WRONG_ADDON_VERSION";
+      // "No valid names" can surface two different ways: entries.length ===
+      // 0 further up throws a plain Error with this exact message, while
+      // runLookup's own (rarely reached now -- see namesNeedingLookup)
+      // internal parsing failure throws LookupError NO_VALID_ENTRIES
+      // instead. Both mean the same thing to the user ("nothing usable was
+      // pasted"), so both map to the same short label.
+      const isNoNames = (err instanceof LookupError && err.code === "NO_VALID_ENTRIES") || (err as Error)?.message === t.errorNoNames;
+      const isConfigIncomplete = err instanceof LookupError && err.code === "CONFIG_INCOMPLETE";
+      // Confirmed live: a clipboard read/write rejected because the browser
+      // tab lost focus (e.g. alt-tabbed back to WoW mid-lookup) surfaces as
+      // a DOMException named NotAllowedError -- a real, unavoidable browser
+      // security restriction, not a bug, so it gets its own short label
+      // ("try again without switching away") instead of the generic one.
+      const isWindowFocus = (err as DOMException)?.name === "NotAllowedError";
+      // Confirmed live: clicking Import with the clipboard empty, holding
+      // the webapp's OWN previous result, or any other non-Export text,
+      // throws this exact message from parseClipboardText (lib/lookup.ts)
+      // -- that function has no access to the locale dict (it's a plain
+      // lib, not UI), so it's a hardcoded English literal matched directly
+      // here instead of compared against a translated t.* string like the
+      // other cases above.
+      const isWrongImport = (err as Error)?.message?.startsWith("Clipboard doesn't look like the addon's Export field");
+
       const message = isWrongVersion
         ? t.wrongAddonVersion
-        : err instanceof LookupError
-          ? err.code === "NO_VALID_ENTRIES"
-            ? t.noValidEntries
-            : t.configIncomplete
-          : (err as Error).message;
+        : isNoNames
+          ? t.noValidEntries
+          : isConfigIncomplete
+            ? t.configIncomplete
+            : (err as Error).message;
       setErrorMessage(message);
       setVersionMismatch(isWrongVersion);
+      setErrorShortLabel(
+        isNoNames
+          ? t.errorShortNoRealm
+          : isConfigIncomplete
+            ? t.errorShortConfig
+            : isWindowFocus
+              ? t.errorShortWindowFocus
+              : isWrongImport
+                ? t.errorShortWrongImport
+                : null
+      );
       setButtonState("error");
       setTimeout(() => setButtonState("idle"), 2500);
     }
@@ -693,7 +757,9 @@ export default function LookupForm() {
           {t.buttonLoading}
         </span>
         <span style={buttonLabelStyle(buttonState === "done")}>{t.buttonDone}</span>
-        <span style={buttonLabelStyle(buttonState === "error" && !versionMismatch)}>{t.buttonErrorRetry}</span>
+        <span style={buttonLabelStyle(buttonState === "error" && !versionMismatch)}>
+          {errorShortLabel ? `${t.buttonErrorRetry}: ${errorShortLabel}` : t.buttonErrorRetry}
+        </span>
         <span style={buttonLabelStyle(buttonState === "error" && versionMismatch)}>{t.buttonWrongVersion}</span>
       </button>
 

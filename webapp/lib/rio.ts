@@ -47,7 +47,8 @@ export async function getRioProfile(name: string, realmSlug: string, region: str
     const itemLevel = data?.gear?.item_level_equipped ?? 0;
     const color = data?.mythic_plus_scores_by_season?.[0]?.segments?.all?.color ?? "#9d9d9d";
     return { score, itemLevel, color };
-  } catch {
+  } catch (err) {
+    console.error(`QueueAnalyzer: raider.io lookup failed for ${name}-${realmSlug}:`, err);
     return null;
   }
 }
