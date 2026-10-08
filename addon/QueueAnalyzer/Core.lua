@@ -452,6 +452,11 @@ local function CreateQueueAnalyzerFrame()
 	importButton:SetSize(74, 22)
 	importButton:SetPoint("LEFT", importBox, "RIGHT", 8, 0)
 	importButton:SetScript("OnClick", function()
+		-- Asks the server for the current applicant list, so anyone who
+		-- withdrew between Export and Import drops off -- see
+		-- QueueAnalyzer_RefreshExport.
+		C_LFGList.RefreshApplicants()
+
 		local data, errorMessage, isVersionMismatch = ParseImportText(f.importBox:GetText())
 		if errorMessage then
 			f.status:SetText(errorMessage)
@@ -487,6 +492,16 @@ function QueueAnalyzer_RefreshExport()
 	if not frame then
 		return
 	end
+
+	-- The same request Blizzard's own Application Viewer makes every time
+	-- it's shown (LFGListApplicationViewer_OnShow) -- confirmed live that
+	-- withdrawn applicants otherwise linger until the panel is reopened.
+	-- It's a request, not a synchronous read: the refreshed list arrives via
+	-- LFG_LIST_APPLICANT_LIST_UPDATED, which repaints Blizzard's list (and
+	-- our readout hook with it). GetApplicantNames below still reads the
+	-- current local copy, so a withdrawal in the same instant can still slip
+	-- into this one Export.
+	C_LFGList.RefreshApplicants()
 
 	local entries = GetApplicantNames()
 	local dungeonName = GetCurrentDungeonName() or ""
